@@ -102,9 +102,18 @@ fn main() -> ! {
         ok(format!("udev: {udev_pre_count} device(s) detected"));
     }
 
-    // Live medium probe -- retry with fresh udev settles, USB storage is slow to enumerate
-    let mut live_result = rootfs::prepare_live_medium_bridge();
-    if matches!(live_result, Ok(None)) {
+    // Live medium probe, only when asked for: the live ISO's entry passes loop=, an installed
+    // system passes root= and must never be swapped for a live USB that is still plugged in.
+    // Retry with fresh udev settles, USB storage is slow to enumerate.
+    let raw_cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let has = |key: &str| raw_cmdline.split_whitespace().any(|t| t.starts_with(key));
+    let wants_live = has("loop=") || !has("root=");
+    let mut live_result = if wants_live {
+        rootfs::prepare_live_medium_bridge()
+    } else {
+        Ok(None)
+    };
+    if wants_live && matches!(live_result, Ok(None)) {
         for _ in 0..5 {
             std::thread::sleep(Duration::from_millis(300));
             udev::settle(Duration::from_millis(300));

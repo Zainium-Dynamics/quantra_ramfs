@@ -56,7 +56,6 @@ pub fn start(theme: Option<&str>) -> bool {
             klog!("  plymouth: ✓ splash started");
             // plymouthd only draws once asked to
             run_plymouth(&["show-splash"]);
-            show_message("Zainium OS booting...");
             true
         }
         Err(e) => {

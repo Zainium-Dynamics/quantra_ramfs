@@ -103,11 +103,15 @@ mkdir -p "$STAGE/overlayer/syshub/share/plymouth/themes"
 cp -a "$SYSHUB/share/plymouth/themes/zainium" \
       "$STAGE/overlayer/syshub/share/plymouth/themes/zainium"
 
-# Splash messages ("Installing system updates…") are drawn by the label plugin with
-# Plymouth.ttf; the base has no file by that name, so give it the UI font.
-mkdir -p "$STAGE/overlayer/syshub/share/fonts"
-cp "$SYSHUB/share/fonts/open-sans/OpenSans-Regular.ttf" \
-   "$STAGE/overlayer/syshub/share/fonts/Plymouth.ttf"
+# Splash messages ("Installing system updates…") are drawn by the label plugin. Without
+# fc-match (none in the initramfs) it loads these four fixed files, and plymouthd crashes
+# when one it asks for is missing; the base has none by these names.
+fonts="$STAGE/overlayer/syshub/share/fonts"
+mkdir -p "$fonts"
+cp "$SYSHUB/share/fonts/open-sans/OpenSans-Regular.ttf" "$fonts/Plymouth.ttf"
+cp "$SYSHUB/share/fonts/open-sans/OpenSans-Bold.ttf" "$fonts/Plymouth-bold.ttf"
+cp "$SYSHUB/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf" "$fonts/Plymouth-monospace.ttf"
+cp "$SYSHUB/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf" "$fonts/Plymouth-monospace-bold.ttf"
 
 # Build the archive.
 ( cd "$STAGE" && find . | cpio -o -H newc 2>/dev/null ) | gzip -9 > "$OUT"

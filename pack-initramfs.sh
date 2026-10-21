@@ -59,6 +59,8 @@ lib/libz.so.1
 lib/plymouth/script.so
 lib/plymouth/renderers/drm.so
 lib/plymouth/renderers/frame-buffer.so
+lib/plymouth/label-freetype.so
+lib/libfreetype.so.6
 x86_64-zainium-linux-musl/lib/ld-musl-x86_64.so.1
 etc/plymouth/plymouthd.conf
 share/plymouth/plymouthd.defaults
@@ -100,6 +102,12 @@ done
 mkdir -p "$STAGE/overlayer/syshub/share/plymouth/themes"
 cp -a "$SYSHUB/share/plymouth/themes/zainium" \
       "$STAGE/overlayer/syshub/share/plymouth/themes/zainium"
+
+# Splash messages ("Installing system updates…") are drawn by the label plugin with
+# Plymouth.ttf; the base has no file by that name, so give it the UI font.
+mkdir -p "$STAGE/overlayer/syshub/share/fonts"
+cp "$SYSHUB/share/fonts/open-sans/OpenSans-Regular.ttf" \
+   "$STAGE/overlayer/syshub/share/fonts/Plymouth.ttf"
 
 # Build the archive.
 ( cd "$STAGE" && find . | cpio -o -H newc 2>/dev/null ) | gzip -9 > "$OUT"

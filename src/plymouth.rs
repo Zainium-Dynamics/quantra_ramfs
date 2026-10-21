@@ -74,6 +74,14 @@ pub fn show_message(msg: &str) {
     run_plymouth(&["message", &format!("--text={}", msg)]);
 }
 
+/// Take down a message shown with [`show_message`].
+pub fn hide_message(msg: &str) {
+    if !PLYMOUTH_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    run_plymouth(&["hide-message", &format!("--text={}", msg)]);
+}
+
 /// Notify Plymouth that a boot phase completed.
 pub fn update_status(status: &str) {
     if !PLYMOUTH_ACTIVE.load(Ordering::Relaxed) {

@@ -59,6 +59,8 @@ lib/libz.so.1
 lib/plymouth/script.so
 lib/plymouth/renderers/drm.so
 lib/plymouth/renderers/frame-buffer.so
+lib/plymouth/label-freetype.so
+lib/libfreetype.so.6
 x86_64-zainium-linux-musl/lib/ld-musl-x86_64.so.1
 etc/plymouth/plymouthd.conf
 share/plymouth/plymouthd.defaults
@@ -100,6 +102,16 @@ done
 mkdir -p "$STAGE/overlayer/syshub/share/plymouth/themes"
 cp -a "$SYSHUB/share/plymouth/themes/zainium" \
       "$STAGE/overlayer/syshub/share/plymouth/themes/zainium"
+
+# Splash messages ("Installing system updates…") are drawn by the label plugin. Without
+# fc-match (none in the initramfs) it loads these four fixed files, and plymouthd crashes
+# when one it asks for is missing; the base has none by these names.
+fonts="$STAGE/overlayer/syshub/share/fonts"
+mkdir -p "$fonts"
+cp "$SYSHUB/share/fonts/open-sans/OpenSans-Regular.ttf" "$fonts/Plymouth.ttf"
+cp "$SYSHUB/share/fonts/open-sans/OpenSans-Bold.ttf" "$fonts/Plymouth-bold.ttf"
+cp "$SYSHUB/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf" "$fonts/Plymouth-monospace.ttf"
+cp "$SYSHUB/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf" "$fonts/Plymouth-monospace-bold.ttf"
 
 # Build the archive.
 ( cd "$STAGE" && find . | cpio -o -H newc 2>/dev/null ) | gzip -9 > "$OUT"

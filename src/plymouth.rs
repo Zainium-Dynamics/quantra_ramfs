@@ -56,7 +56,6 @@ pub fn start(theme: Option<&str>) -> bool {
             klog!("  plymouth: ✓ splash started");
             // plymouthd only draws once asked to
             run_plymouth(&["show-splash"]);
-            show_message("Zainium OS booting...");
             true
         }
         Err(e) => {
@@ -72,6 +71,14 @@ pub fn show_message(msg: &str) {
         return;
     }
     run_plymouth(&["message", &format!("--text={}", msg)]);
+}
+
+/// Take down a message shown with [`show_message`].
+pub fn hide_message(msg: &str) {
+    if !PLYMOUTH_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    run_plymouth(&["hide-message", &format!("--text={}", msg)]);
 }
 
 /// Notify Plymouth that a boot phase completed.

@@ -7,6 +7,7 @@ macro_rules! klog {
 mod cmdline;
 mod emergency;
 mod fsck;
+mod gpu;
 mod log;
 mod measured_boot;
 mod mounts;
@@ -78,14 +79,6 @@ fn main() -> ! {
         restore_console_stderr();
     }
     ok("Mounted early filesystems");
-
-    if plymouth::is_enabled() {
-        plymouth::setup_kms_framebuffer();
-        if plymouth::start(None) {
-            // Plymouth owns the display now; emergency::shell() brings the console back
-            redirect_stderr_to_kmsg();
-        }
-    }
 
     // vconsole keymap in initrd
     plymouth::setup_initrd_vconsole();
@@ -333,6 +326,21 @@ fn main() -> ! {
     }
     ok(format!("Mounted root filesystem → {zairoot}"));
 
+    // The display driver comes from the root disk and the splash starts on it, so there is
+    // no hand-over from the firmware framebuffer later in the boot (and a LUKS passphrase
+    // prompt before this point stays on the console).
+    let displays = gpu::load_from_disk(zairoot);
+    if displays > 0 {
+        ok(format!("Display driver loaded from the root disk ({displays} device(s))"));
+    }
+    if plymouth::is_enabled() {
+        plymouth::setup_kms_framebuffer();
+        if plymouth::start(None) {
+            // Plymouth owns the display now; emergency::shell() brings the console back
+            redirect_stderr_to_kmsg();
+        }
+    }
+
     // rd.break=pre-overlay — shell after disk mount, before OverlayFS
     if cmdline.rd_break == Some(RdBreak::PreOverlay) {
         ok("rd.break=pre-overlay: dropping to emergency shell");
@@ -385,6 +393,7 @@ fn main() -> ! {
 
     // Phase 6: pivot_root → execv init
     set_phase(BootPhase::PIVOT);
+    gpu::release();
     if let Err(e) = switch::pivot_to_root(&boot_target) {
         fail(format!("switch_root failed: {e}"));
         emergency::shell("switch_root");

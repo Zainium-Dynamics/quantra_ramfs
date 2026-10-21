@@ -21,6 +21,9 @@ const ROLLBACK: &str = "overlayer/.syshub-rollback";
 const BASE: &str = "overlayer/syshub";
 const UNION: &str = "overlayer/zexlib/union";
 
+/// Shown on the splash while a staged upgrade goes into the base.
+const UPDATING: &str = "Installing system updates…";
+
 const FS_IOC_GETFLAGS: libc::c_ulong = 0x8008_6601;
 const FS_IOC_SETFLAGS: libc::c_ulong = 0x4008_6602;
 const FS_IMMUTABLE_FL: libc::c_long = 0x10;
@@ -63,12 +66,14 @@ pub fn run(zairoot: &str) {
     }
 
     if pending.join("READY").exists() {
+        crate::plymouth::show_message(UPDATING);
         clear_tree_immutable(&pending);
         match apply(z, &pending, &rollback) {
             Ok(txn) => klog!("  ✓ syshub: upgrade {txn} applied to base"),
             Err(e) => klog!("  ✗ syshub: upgrade not applied, base unchanged: {e}"),
         }
         empty_dir(&pending);
+        crate::plymouth::hide_message(UPDATING);
     }
 }
 

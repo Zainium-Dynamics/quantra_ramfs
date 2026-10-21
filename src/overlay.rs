@@ -227,8 +227,8 @@ pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
             if ft.is_dir() {
                 bind_dir(&src, &dest)?;
             } else if ft.is_file() {
-                // a missing doc file must never stop the boot
-                if let Err(e) = bind_file(&src, &dest) {
+                // the docs are read-only at runtime; a missing doc file must never stop the boot
+                if let Err(e) = bind_ro_file(&src, &dest) {
                     klog!("  warning: {}", e);
                 }
             } else if ft.is_symlink() {
@@ -262,7 +262,7 @@ fn bind_dir(src: &str, dest: &str) -> Result<(), String> {
 }
 
 /// Bind mount the file `src` onto an empty file created at `dest`.
-fn bind_file(src: &str, dest: &str) -> Result<(), String> {
+fn bind_ro_file(src: &str, dest: &str) -> Result<(), String> {
     fs::File::create(dest).map_err(|e| format!("create {}: {}", dest, e))?;
     mount(
         Some(src),
@@ -272,7 +272,15 @@ fn bind_file(src: &str, dest: &str) -> Result<(), String> {
         None::<&str>,
     )
     .map_err(|e| format!("bind mount '{}' → '{}': {}", src, dest, e))?;
-    klog!("  ✓ {} bind mounted ← {}", dest, src);
+    mount(
+        None::<&str>,
+        dest,
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+        None::<&str>,
+    )
+    .map_err(|e| format!("remount ro '{}': {}", dest, e))?;
+    klog!("  ✓ {} bind mounted ← {} (read-only)", dest, src);
     Ok(())
 }
 

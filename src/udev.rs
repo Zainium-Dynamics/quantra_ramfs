@@ -80,14 +80,21 @@ pub fn settle(duration: Duration) -> usize {
     let sock_fd = fd;
     set_nonblocking(sock_fd);
 
+    // `duration` is an upper bound: once the kernel has been quiet for QUIET the
+    // devices present at boot are all in, and waiting out the rest only delays the splash
+    const QUIET: Duration = Duration::from_millis(150);
+    let mut last_event = Instant::now();
     let mut buf = vec![0u8; 8192];
     while start.elapsed() < duration {
         let n = unsafe { libc::recv(sock_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
         if n <= 0 {
-            // No message — sleep 10ms and retry
+            if last_event.elapsed() >= QUIET {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(10));
             continue;
         }
+        last_event = Instant::now();
 
         if let Some(ev) = parse_uevent(&buf[..n as usize]) {
             if ev.action == "add" && ev.subsystem == "block" && create_dev_node(&ev) {

@@ -107,8 +107,11 @@ fn main() -> ! {
         Ok(None)
     };
     if wants_live && matches!(live_result, Ok(None)) {
-        for _ in 0..5 {
-            std::thread::sleep(Duration::from_millis(300));
+        // settle now returns as soon as udev is quiet, so bound the search by time
+        // (USB sticks can take a few seconds to show up), not by a retry count
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
             udev::settle(Duration::from_millis(300));
             live_result = rootfs::prepare_live_medium_bridge();
             if !matches!(live_result, Ok(None)) {
@@ -158,8 +161,9 @@ fn main() -> ! {
         emergency::shell("rd.break=pre-mount");
     }
 
-    // Extra udev settle if udev is enabled — wait for slow devices
-    if cmdline.udev_enabled {
+    // Extra udev settle if udev is enabled — wait for slow devices. A live medium that
+    // was already found needs no more waiting.
+    if cmdline.udev_enabled && live_image.is_none() {
         let rootwait_ms = match cmdline.rootwait {
             Some(0) => 10_000, // bare rootwait — give udev 10s
             Some(n) => n as u64 * 50,

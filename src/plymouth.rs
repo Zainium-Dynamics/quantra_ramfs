@@ -52,7 +52,13 @@ pub fn start(theme: Option<&str>) -> bool {
     match cmd.spawn() {
         Ok(_child) => {
             PLYMOUTH_ACTIVE.store(true, Ordering::Relaxed);
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            // ready as soon as it answers, instead of a fixed wait
+            for _ in 0..50 {
+                if plymouth_ok(&["--ping"]) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             klog!("  plymouth: ✓ splash started");
             // plymouthd only draws once asked to
             run_plymouth(&["show-splash"]);
@@ -513,6 +519,15 @@ fn find_bin(candidates: &[&str]) -> Option<String> {
         .iter()
         .find(|&&p| Path::new(p).exists())
         .map(|&p| p.to_string())
+}
+
+fn plymouth_ok(args: &[&str]) -> bool {
+    find_bin(PLYMOUTH_BINS).is_some_and(|bin| {
+        std::process::Command::new(&bin)
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success())
+    })
 }
 
 fn run_plymouth(args: &[&str]) {

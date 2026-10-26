@@ -109,7 +109,7 @@ fn main() -> ! {
     if wants_live && matches!(live_result, Ok(None)) {
         // settle now returns as soon as udev is quiet, so bound the search by time
         // (USB sticks can take a few seconds to show up), not by a retry count
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(200));
             udev::settle(Duration::from_millis(300));

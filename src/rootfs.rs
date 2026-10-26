@@ -352,7 +352,7 @@ pub fn mount_live_root(
 /// Retries are configurable via kernel cmdline:
 /// - `rootwait`   → infinite wait (for slow USB/NVMe enumeration)
 /// - `rootwait=N` → N retries × 50ms
-/// - (absent)     → default 20 retries × 50ms = 1 second
+/// - (absent)     → default 100 retries × 50ms = 5 seconds
 #[inline]
 pub fn find_root(cmdline: &Cmdline) -> Result<String, String> {
     let root_spec = cmdline.root.as_ref().ok_or("No root= parameter")?;
@@ -379,12 +379,14 @@ pub fn find_root(cmdline: &Cmdline) -> Result<String, String> {
     // Dynamic root wait — configurable via kernel cmdline rootwait=N
     // rootwait=100 → 100 retries × 50ms = 5 seconds
     // rootwait (bare, no value) → infinite wait (0 = infinite)
-    // No rootwait → default 20 retries (1 second)
+    // No rootwait → default 100 retries (5 seconds): udev settle returns as soon as the
+    // kernel is quiet, so a slow disk controller is waited for here; a disk that is
+    // already there costs nothing
     const RETRY_MS: u64 = 50;
     let max_retries: u32 = match cmdline.rootwait {
         Some(0) => u32::MAX, // rootwait (bare) — wait indefinitely
         Some(n) => n,        // rootwait=N — wait N × 50ms
-        None => 20,          // default — 20 × 50ms = 1s
+        None => 100,         // default — 100 × 50ms = 5s
     };
 
     for attempt in 0..max_retries {

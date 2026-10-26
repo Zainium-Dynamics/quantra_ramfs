@@ -43,7 +43,7 @@ pub struct Cmdline {
     pub root_fstype: Option<String>,
     /// Extra mount options (e.g. `subvol=@,compress=zstd` for Btrfs)
     pub root_flags: Option<String>,
-    /// rootwait=N retries × 50ms; Some(0) = infinite; None = default 20
+    /// rootwait=N retries × 50ms; Some(0) = infinite; None = default 100
     pub rootwait: Option<u32>,
 
     // Init

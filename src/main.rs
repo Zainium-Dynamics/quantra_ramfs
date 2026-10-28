@@ -4,6 +4,7 @@ macro_rules! klog {
     ($($arg:tt)*) => { $crate::log::line(format!($($arg)*)) };
 }
 
+mod baseverity;
 mod cmdline;
 mod emergency;
 mod fsck;

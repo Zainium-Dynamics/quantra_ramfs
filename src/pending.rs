@@ -158,6 +158,10 @@ fn place(staged: &Path, e: &Entry, dst: &Path) -> Result<(), String> {
             fs::copy(&src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(*mode)).map_err(|e| e.to_string())?;
             File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+            // sealed before it takes the real name: once in the base, its content cannot be rewritten
+            if let Err(e) = crate::baseverity::enable(&tmp) {
+                klog!("  ⚠ fs-verity: {}: {e}", dst.display());
+            }
         }
         Entry::Link { target, .. } => {
             symlink(target, &tmp).map_err(|e| format!("symlink {}: {e}", tmp.display()))?;

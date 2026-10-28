@@ -122,6 +122,7 @@ pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
         Ok(()) => {
             // staged `zex syshub -u` upgrades go into the base here, while nothing has it mounted
             crate::pending::run(zairoot);
+            crate::baseverity::ensure_base(zairoot);
             (phys_upper, phys_work, phys_zexlib)
         }
         Err(e) => {

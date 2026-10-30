@@ -1,12 +1,4 @@
-//! Display driver from the root disk, before the splash starts.
-//!
-//! The initramfs carries no GPU modules or firmware (amdgpu, xe and newer NVIDIA cards
-//! do not start without their firmware, and all of it is hundreds of MB). Once the root
-//! is mounted, its drivers dir (modules and firmware) is bound read-only at its runtime
-//! path, where the kernel's firmware loader looks, and every PCI display device's
-//! modalias picks its modules from modules.alias, loaded in modules.dep order the way
-//! modprobe does. The splash then starts on the real driver, with no hand-over from the
-//! firmware framebuffer later in the boot.
+//! Display driver and firmware from the root disk, loaded before the splash starts.
 
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
 use std::collections::HashMap;
@@ -21,9 +13,7 @@ const DRIVERS: &str = "/overlayer/syshub/drivers";
 /// `finit_module` flag for a compressed module file.
 const MODULE_INIT_COMPRESSED_FILE: libc::c_uint = 4;
 
-/// Loads the drivers of the PCI display devices from `zairoot`'s module tree and waits for
-/// their DRM device. Returns how many display devices got a driver; 0 leaves the boot as it
-/// was (the splash falls back to the firmware framebuffer after its device timeout).
+/// Loads the drivers of the PCI display devices from the disk; returns how many got one.
 pub fn load_from_disk(zairoot: &str) -> usize {
     let release = match fs::read_to_string("/proc/sys/kernel/osrelease") {
         Ok(r) => r.trim().to_string(),
@@ -34,8 +24,7 @@ pub fn load_from_disk(zairoot: &str) -> usize {
         klog!("  gpu: no drivers dir on the root disk");
         return 0;
     }
-    // a kernel installed by `zex kernel` boots once before its modules leave the staged
-    // upgrade (they go into the base later in this boot, with the splash up): load from there
+    // a kernel just installed by zex kernel boots once before its modules leave the staged upgrade
     let mut moddir = format!("{DRIVERS}/modules/{release}");
     let staged = format!("{zairoot}/overlayer/.syshub-pending/root/drivers/modules/{release}");
     if !Path::new(&moddir).is_dir() && Path::new(&staged).is_dir() {
@@ -82,8 +71,7 @@ fn bind_ro(src: &str, dest: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// `modalias` of every PCI device of class 0x03 (display) and of the devices directly
-/// under it: a virtio GPU's driver matches its `virtio0` child, not the PCI function.
+/// modalias of every PCI display device and of its direct children (virtio GPUs match the child).
 fn display_modaliases() -> Vec<String> {
     let Ok(entries) = fs::read_dir("/sys/bus/pci/devices") else {
         return Vec::new();
@@ -142,8 +130,7 @@ fn module_name(path: &str) -> String {
     base.replace('-', "_")
 }
 
-/// Loads `module` after its dependencies (modules.dep lists them so the last one goes first).
-/// A module that is not in modules.dep is built in, or missing; either way there is nothing to load.
+/// Loads `module` after its dependencies from modules.dep; built-in or missing modules are skipped.
 fn load_with_deps(
     moddir: &str,
     module: &str,

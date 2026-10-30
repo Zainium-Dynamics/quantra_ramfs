@@ -1,20 +1,4 @@
-//! Early filesystem mounting module
-//!
-//! Mounts essential pseudo-filesystems in strict order:
-//! 1. /proc - Kernel interface (REQUIRED for cmdline parsing)
-//! 2. /sys  - Device enumeration (REQUIRED for udev)
-//! 3. /dev  - Device nodes (REQUIRED for block devices)
-//! 4. /run  - Runtime data (mount point setup)
-//! 5. /dev/pts - Container terminals (OPTIONAL - fails silently)
-//! 6. /dev/shm - Shared memory (OPTIONAL - fails silently)
-//!
-//! After /dev is mounted, essential block device nodes are created
-//! explicitly via mknod(2) because devtmpfs does not always auto-populate
-//! loop devices in initramfs context before udevd starts.
-//!
-//! Loop device major/minor numbers (from Linux kernel source):
-//!   /dev/loop-control → major=10, minor=237  (misc device)
-//!   /dev/loop0..7     → major=7,  minor=0..7 (block devices)
+//! Mounts /proc, /sys, /dev, /run (required) and /dev/pts, /dev/shm (optional), in that order.
 
 use nix::mount::{MsFlags, mount};
 use std::fs;
@@ -23,8 +7,7 @@ use std::fs;
 const PROC_FLAGS: MsFlags = MsFlags::empty();
 const SYS_FLAGS: MsFlags = MsFlags::empty();
 
-// /dev: NO flags in initramfs — MS_NOSUID on devtmpfs prevents loop node creation
-//       on kernels without CONFIG_DEVTMPFS_SAFE. Applied later on real root.
+// no nosuid on devtmpfs here: it stops loop node creation on some kernels
 const DEV_FLAGS: MsFlags = MsFlags::empty();
 
 // /run: nosuid + nodev, allow exec (needed for lock files, pipes)
@@ -38,16 +21,7 @@ const SHM_FLAGS: MsFlags = MsFlags::MS_NOSUID
 // Directories to create before mounting
 const EARLY_DIRS: &[&str] = &["/proc", "/sys", "/dev", "/run"];
 
-/// Mount all early filesystems in strict order.
-///
-/// Critical mounts (/proc, /sys, /dev, /run) must succeed — boot aborts on failure.
-/// Optional mounts (/dev/pts, /dev/shm) fail silently (not needed in initramfs).
-///
-/// After /dev mount: creates loop device nodes explicitly so loop ioctls work
-/// immediately without waiting for udevd or kernel devtmpfs population.
-///
-/// # Errors
-/// Returns error if any critical mount fails.
+/// Mounts the early filesystems; fails only when a required one cannot be mounted.
 #[inline]
 pub fn mount_early() -> Result<(), String> {
     klog!("Mounting early filesystems...");
@@ -90,8 +64,7 @@ pub fn mount_early() -> Result<(), String> {
     .map_err(|e| format!("CRITICAL: /dev mount failed: {} (errno: {})", e, e as i32))?;
     klog!("  ✓ /dev");
 
-    // Explicitly create loop device nodes — devtmpfs may not auto-populate them
-    // in initramfs context (no udevd running, CONFIG_DEVTMPFS_SAFE may differ)
+    // devtmpfs may not create the loop nodes without udev
     create_essential_devices();
 
     // made after devtmpfs is on /dev, else they are hidden; plymouth needs devpts for /dev/ptmx
@@ -135,21 +108,9 @@ pub fn mount_early() -> Result<(), String> {
     Ok(())
 }
 
-/// Create loop device nodes that devtmpfs may not auto-populate.
-///
-/// Linux kernel major/minor assignments (drivers/block/loop.c):
-/// - `/dev/loop-control`: character device, major=10 (misc), minor=237
-/// - `/dev/loop0..7`:     block devices,    major=7  (loop), minor=0..7
-///
-/// These nodes are always safe to mknod — if they already exist the call
-/// returns EEXIST which is silently ignored.
-///
-/// # Safety
-/// Only `mknod(2)` and `makedev(3)` are called — both are async-signal-safe
-/// and have no heap allocations.
+/// Creates /dev/loop-control and /dev/loop0..7; existing nodes are left alone.
 fn create_essential_devices() {
-    // /dev/loop-control — character device (misc major 10, minor 237)
-    // Required for LOOP_CTL_GET_FREE ioctl
+    // /dev/loop-control: misc major 10, minor 237
     unsafe {
         let path = b"/dev/loop-control\0";
         libc::mknod(
@@ -159,8 +120,7 @@ fn create_essential_devices() {
         );
     }
 
-    // /dev/loop0 through /dev/loop7 — block devices (major 7)
-    // Required for LOOP_SET_FD ioctl and mount(2)
+    // /dev/loop0..7: block major 7
     for n in 0u32..8 {
         unsafe {
             // Build "/dev/loopN\0" on stack — no heap allocation

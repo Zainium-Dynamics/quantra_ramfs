@@ -1,12 +1,4 @@
-//! fs-verity for the base: every regular file in `overlayer/syshub` and the kernel files in
-//! `overlayer/zaisys/kernel` gets fs-verity, after which the kernel refuses any write to its
-//! content — root included, on the running system. Files from a staged upgrade get it as they
-//! are placed (pending::place); a base without it gets it once here, before the overlay is
-//! mounted (marker: `overlayer/syshub/engine/.fsverity`).
-//!
-//! Renames and unlinks still work, so staged upgrades and rollbacks keep working; the syshub
-//! guard (guard.rs) is what stops those on the running system. Needs ext4 with the `verity`
-//! feature (the installer creates it) or btrfs; elsewhere this does nothing.
+//! fs-verity for the base: once sealed, the kernel refuses any write to a base file, root included.
 
 use std::fs::{self, File};
 use std::io;
@@ -37,8 +29,7 @@ struct EnableArg {
     reserved2: [u64; 11],
 }
 
-/// Turns on fs-verity for one regular file. Ok(true) when it was turned on now,
-/// Ok(false) when the file already had it.
+/// Turns on fs-verity for one file: Ok(true) if done now, Ok(false) if it already had it.
 pub fn enable(path: &Path) -> io::Result<bool> {
     let f = File::open(path)?;
     let fd = f.as_raw_fd();

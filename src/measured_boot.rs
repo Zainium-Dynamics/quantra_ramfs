@@ -1,38 +1,7 @@
-/// Measured boot — TPM2 PCR extension at each boot phase
-///
-/// # Overview
-///
-/// Measured boot creates a tamper-evident audit trail of the boot process by
-/// extending TPM2 PCR[8] at every phase transition. Each extension is a
-/// SHA-256 hash of a measurement string. PCR extension is defined as
-/// `PCR[n] = SHA-256(PCR[n] || new_value)`, so the final PCR[8] value is
-/// uniquely determined by the exact sequence of measurements. Any
-/// deviation — a phase skipped, a different binary, a different cmdline —
-/// produces a different PCR[8] value, which causes the TPM2 policy session
-/// in `tpm2.rs` to reject the unseal.
-///
-/// # What gets measured
-///
-/// A phase transition measures `"zainium-phase:<N>:<name>"`; the cmdline
-/// measures `"zainium-cmdline:<sha256 of /proc/cmdline>"`; the init binary
-/// measures `"zainium-init:<sha256 of init binary>"`; the overlay config
-/// measures `"zainium-overlay:<enabled|disabled>"`.
-///
-/// # PCR choice
-///
-/// PCR 8 is used (not 0–7 which are reserved for firmware/UEFI/Secure Boot).
-/// PCR 8 starts at zero on every boot, giving a clean slate for our measurements.
-///
-/// # TPM2 command
-///
-/// `TPM2_PCR_Extend` (CC=0x0182): header with tag=TPM2_ST_SESSIONS, size,
-/// and cc=0x0182; pcrHandle=8; a password auth session with empty auth;
-/// one digest, hashAlg=SHA256, 32 bytes.
+/// Measured boot: extends TPM2 PCR 8 at every boot phase.
 use std::fs;
 use std::io;
 use std::os::unix::io::RawFd;
-
-// TPM2 constants
 
 const TPM2_ST_SESSIONS: u16 = 0x8002;
 const TPM2_CC_PCR_EXTEND: u32 = 0x0182;
@@ -41,8 +10,6 @@ const TPM2_ALG_SHA256: u16 = 0x000B;
 const TPM2_RC_SUCCESS: u32 = 0x000;
 
 const PCR_INDEX: u32 = 8;
-
-// RAII fd guard
 
 struct FdGuard(RawFd);
 impl Drop for FdGuard {
@@ -55,12 +22,7 @@ impl Drop for FdGuard {
     }
 }
 
-// Public API
-
-/// Extend PCR[8] with a measurement of the current boot phase.
-///
-/// Called by `set_phase()` in `phases.rs` for each phase transition.
-/// If no TPM2 device is present, this is a no-op (non-fatal).
+/// Extends PCR 8 with the phase; does nothing without a TPM.
 pub fn measure_phase(phase: u32, phase_name: &str) {
     let measurement = format!("zainium-phase:{}:{}", phase, phase_name);
     if let Err(e) = extend_pcr(PCR_INDEX, measurement.as_bytes()) {
@@ -69,10 +31,7 @@ pub fn measure_phase(phase: u32, phase_name: &str) {
     }
 }
 
-/// Extend PCR[8] with SHA-256 of /proc/cmdline content.
-///
-/// Ensures the full kernel cmdline is measured — any change to boot parameters
-/// invalidates the PCR policy.
+/// Extends PCR 8 with /proc/cmdline.
 pub fn measure_cmdline() {
     match fs::read_to_string("/proc/cmdline") {
         Ok(cmdline) => {
@@ -88,10 +47,7 @@ pub fn measure_cmdline() {
     }
 }
 
-/// Extend PCR[8] with SHA-256 of the init binary.
-///
-/// Called after init binary is discovered but before pivot_root.
-/// Ensures the exact binary being handed control is recorded.
+/// Extends PCR 8 with the init binary before control is handed to it.
 pub fn measure_init_binary(new_root: &str, init_path: &str) {
     let full = format!("{}{}", new_root, init_path);
     match fs::read(&full) {
@@ -132,8 +88,6 @@ pub fn read_pcr8() -> Option<[u8; 32]> {
     read_pcr(PCR_INDEX).ok()
 }
 
-// TPM2 PCR extend
-
 /// Extend `pcr_index` with SHA-256(`data`).
 fn extend_pcr(pcr_index: u32, data: &[u8]) -> Result<(), String> {
     let digest = sha256(data);
@@ -141,8 +95,7 @@ fn extend_pcr(pcr_index: u32, data: &[u8]) -> Result<(), String> {
     let fd = open_tpm()?;
     let _g = FdGuard(fd);
 
-    // Build TPM2_PCR_Extend command
-    // Auth area: password session for PCR (empty auth — PCRs have no auth by default)
+    // TPM2_PCR_Extend with an empty password session (PCRs have no auth)
     let mut auth = Vec::with_capacity(9);
     push_u32(&mut auth, TPM2_RS_PW);
     push_u16(&mut auth, 0); // nonce
@@ -202,9 +155,7 @@ fn read_pcr(pcr_index: u32) -> Result<[u8; 32], String> {
     cmd.extend_from_slice(&sel);
 
     let resp = tpm2_send(fd, &cmd)?;
-    // Response: header(10) + updateCounter(4) + pcrSelectionOut + pcrValues
-    // pcrValues = TPML_DIGEST: count(4) + TPM2B_DIGEST: size(2) + digest[32]
-    // offset: 10(hdr) + 4(counter) + 4(count) + 2+1+3(sel) + 4(count) + 2 = 30
+    // header 10, counter 4, selection 10, digest count 4, digest size 2: digest starts at 30
     if resp.len() < 30 + 32 {
         return Err("TPM2_PCR_Read response too short".to_string());
     }
@@ -212,8 +163,6 @@ fn read_pcr(pcr_index: u32) -> Result<[u8; 32], String> {
     out.copy_from_slice(&resp[30..62]);
     Ok(out)
 }
-
-// I/O helpers
 
 fn open_tpm() -> Result<RawFd, String> {
     for path in &["/dev/tpmrm0", "/dev/tpm0"] {
@@ -256,8 +205,6 @@ fn push_u16(v: &mut Vec<u8>, val: u16) {
 fn push_u32(v: &mut Vec<u8>, val: u32) {
     v.extend_from_slice(&val.to_be_bytes());
 }
-
-// Pure-Rust SHA-256 (FIPS 180-4)
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,

@@ -1,41 +1,7 @@
-/// dm-verity rootfs integrity verification
-///
-/// # Overview
-///
-/// dm-verity is a Linux kernel device-mapper target that provides transparent
-/// integrity checking of block devices using a Merkle hash tree. Every 4 KB
-/// data block on the root partition has a corresponding SHA-256 hash, and those
-/// hashes are themselves hashed in a tree structure. The root hash of this tree
-/// (the "roothash") is the single value that must be trusted.
-///
-/// # Implementation strategy
-///
-/// This module sets up dm-verity by writing to the kernel's device-mapper
-/// control interface (`/dev/mapper/control`) using the DM ioctl protocol.
-/// No `veritysetup` binary is required.
-///
-/// DM ioctl protocol (`<linux/dm-ioctl.h>`): open `/dev/mapper/control`,
-/// `DM_VERSION` to check the kernel's DM version, `DM_DEV_CREATE` to make
-/// `/dev/mapper/<name>`, `DM_TABLE_LOAD` to load the verity target table,
-/// `DM_DEV_SUSPEND` (flag 0) to activate it.
-///
-/// # Root hash source priority
-///
-/// Kernel cmdline `rd.verity.roothash=<hex64>`, then a pre-provisioned
-/// `/verity/roothash` file on the data partition, then a TPM-provisioned
-/// UEFI variable `ZainiumVerityRoothash-<guid>`.
-///
-/// # Cmdline parameters
-///
-/// `rd.verity=1` enables it. `rd.verity.data=` is the data device,
-/// `rd.verity.hash=` the hash device (if separate), `rd.verity.roothash=`
-/// the expected root hash, `rd.verity.hashoffset=` the hash tree offset
-/// (if same device).
+/// dm-verity for the root: every block is checked against a hash tree before it is read.
 use std::fs;
 use std::io;
 use std::os::unix::io::RawFd;
-
-// DM ioctl constants (from <linux/dm-ioctl.h>)
 
 const DM_IOCTL: u8 = 0xfd;
 const DM_VERSION_CMD: u8 = 0;
@@ -44,8 +10,7 @@ const DM_DEV_SUSPEND_CMD: u8 = 5;
 const DM_DEV_REMOVE_CMD: u8 = 6;
 const DM_TABLE_LOAD_CMD: u8 = 9;
 
-// ioctl request codes (Linux _IOWR macro: type=0xfd, nr, size)
-// Size of dm_ioctl struct = 312 bytes
+// dm ioctl codes; struct dm_ioctl is 312 bytes
 const DM_IOCTL_SIZE: usize = 312;
 
 #[allow(non_snake_case)]
@@ -84,8 +49,6 @@ struct DmTargetSpec {
     target_type: [u8; 16], // null-terminated target name
 }
 
-// RAII fd guard
-
 struct FdGuard(RawFd);
 impl Drop for FdGuard {
     fn drop(&mut self) {
@@ -96,8 +59,6 @@ impl Drop for FdGuard {
         }
     }
 }
-
-// Verity configuration
 
 /// Parsed dm-verity configuration from cmdline.
 #[derive(Debug, Clone)]
@@ -121,11 +82,7 @@ pub struct VerityDevice {
     pub path: String,
 }
 
-// Public API
-
-/// Parse verity configuration from kernel cmdline string.
-///
-/// Returns `None` if `rd.verity=1` is not present (verity disabled).
+/// Reads the verity settings from the cmdline; None without rd.verity=1.
 pub fn parse_verity_cmdline(cmdline: &str) -> Option<Result<VerityConfig, String>> {
     // Check if verity is enabled at all
     if !cmdline.split_whitespace().any(|t| t == "rd.verity=1") {
@@ -173,10 +130,7 @@ pub fn parse_verity_cmdline(cmdline: &str) -> Option<Result<VerityConfig, String
     }))
 }
 
-/// Set up dm-verity and return the verified device path.
-///
-/// On success, `/dev/mapper/<dm_name>` is ready for mounting.
-/// The kernel will reject any read from a block that fails hash verification.
+/// Sets up dm-verity and returns /dev/mapper/<name>, ready to mount.
 pub fn setup_verity(cfg: &VerityConfig) -> Result<VerityDevice, String> {
     klog!("  dm-verity:");
     klog!("    data  = {}", cfg.data_device);
@@ -221,8 +175,7 @@ pub fn setup_verity(cfg: &VerityConfig) -> Result<VerityDevice, String> {
     Ok(VerityDevice { path })
 }
 
-/// Remove a dm-verity device (call before pivot_root if verity device was
-/// used only for verification and the real mount is elsewhere).
+/// Removes a dm-verity device that was only needed for checking.
 #[allow(dead_code)]
 pub fn remove_verity(name: &str) -> Result<(), String> {
     let ctrl_path = b"/dev/mapper/control\0";
@@ -241,8 +194,6 @@ pub fn remove_verity(name: &str) -> Result<(), String> {
     let _g = FdGuard(ctrl_fd);
     dm_dev_remove(ctrl_fd, name)
 }
-
-// DM ioctl helpers
 
 fn new_dm_ioctl(name: &str) -> DmIoctl {
     let mut ioc: DmIoctl = unsafe { std::mem::zeroed() };
@@ -291,9 +242,7 @@ fn dm_dev_create(fd: RawFd, name: &str) -> Result<(), String> {
 }
 
 fn dm_table_load_verity(fd: RawFd, cfg: &VerityConfig, data_sectors: u64) -> Result<(), String> {
-    // Build the verity target params string:
-    // "<version> <data_dev> <hash_dev> <data_block_sz> <hash_block_sz>
-    //  <num_data_blocks> <hash_start_block> <algorithm> <digest> <salt>"
+    // <version> <data> <hash> <data_bs> <hash_bs> <blocks> <hash_start> <alg> <digest> <salt>
     let roothash_hex = encode_hex(&cfg.roothash);
     // hash_start = cfg.hash_offset in 4096-byte blocks (512-byte sectors → /8)
     let hash_start_block = cfg.hash_offset / 8;
@@ -401,8 +350,6 @@ fn dm_dev_remove(fd: RawFd, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-// Block device size helper
-
 /// Get block device size in 512-byte sectors via BLKGETSIZE64 ioctl.
 fn get_block_device_sectors(device: &str) -> Result<u64, String> {
     const BLKGETSIZE64: libc::c_ulong = 0x80081272;
@@ -417,11 +364,7 @@ fn get_block_device_sectors(device: &str) -> Result<u64, String> {
     let _g = FdGuard(fd);
 
     let mut size_bytes: u64 = 0;
-    // musl's ioctl() takes `request: c_int`, glibc's takes `c_ulong` - this
-    // constant has the high bit set (it's a _IOR() request number), so a
-    // checked `try_into()` would panic here even though the value is
-    // completely normal. A raw bit-reinterpreting cast is what C itself
-    // does, and it's what we want too.
+    // musl's ioctl takes a c_int: reinterpret the request bits as C does
     let ret = unsafe { libc::ioctl(fd, BLKGETSIZE64 as libc::c_int, &mut size_bytes as *mut u64) };
     if ret < 0 {
         return Err(format!(
@@ -434,8 +377,6 @@ fn get_block_device_sectors(device: &str) -> Result<u64, String> {
     // Convert bytes → 512-byte sectors
     Ok(size_bytes / 512)
 }
-
-// Hex encode / decode
 
 fn decode_roothash(hex: &str) -> Result<[u8; 32], String> {
     let hex = hex.trim();
@@ -473,10 +414,7 @@ fn encode_hex(bytes: &[u8]) -> String {
     s
 }
 
-// Roothash provisioning helpers
-
-/// Try to read roothash from a file on a pre-mounted filesystem.
-/// Used when roothash is stored on a separate trusted partition.
+/// Reads the root hash from a file on an already mounted trusted partition.
 #[allow(dead_code)]
 pub fn read_roothash_from_file(path: &str) -> Result<[u8; 32], String> {
     let content =

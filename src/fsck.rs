@@ -1,35 +1,7 @@
-/// Filesystem check before mounting root — fsck wrapper
-///
-/// # Overview
-///
-/// Runs `fsck` on the root partition before mounting it. This catches
-/// filesystem corruption early and either auto-repairs it (if safe) or
-/// drops to emergency shell with a clear error.
-///
-/// # Strategy
-///
-/// We call `fsck` via `execv` (not `Command::new`) because in initramfs,
-/// `fsck` may live at `/sbin/fsck` or `/sbin/fsck.<type>`. We try several
-/// paths and pick the first that exists.
-///
-/// # fsck exit codes (POSIX)
-///
-/// 0 = no errors, 1 = filesystem errors corrected, 2 = system should be
-/// rebooted, 4 = filesystem errors left uncorrected, 8 = operational
-/// error, 16 = usage/syntax error, 32 = fsck canceled by user, 128 =
-/// shared library error. Codes 0 and 1 are safe to continue; codes ≥ 2
-/// drop to the emergency shell.
-///
-/// # fsck skipped for
-/// - Squashfs / iso9660 / tmpfs (read-only by design, no journal)
-/// - NFS root
-/// - Loop devices (the underlying ISO is read-only)
-/// - LUKS-decrypted devices before verity check
+/// Runs fsck on the root partition before it is mounted.
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
-
-// fsck binary search paths
 
 const FSCK_PATHS: &[&str] = &[
     "/sbin/fsck",
@@ -44,15 +16,7 @@ const SKIP_FSTYPES: &[&str] = &[
     "overlay",
 ];
 
-// Public API
-
-/// Run filesystem check on `device` before mounting it as root.
-///
-/// `fstype`: if known (from cmdline `rootfstype=`), passed to fsck. If `None`,
-/// fsck auto-detects.
-///
-/// Returns `Ok(())` if the filesystem is clean or was repaired.
-/// Returns `Err` if fsck found uncorrectable errors or could not run.
+/// Checks `device` (fstype from rootfstype= if given); Err when fsck cannot repair it or run.
 pub fn check_root(device: &str, fstype: Option<&str>) -> Result<(), String> {
     // Skip filesystems that cannot be fscked
     if let Some(ft) = fstype {
@@ -85,9 +49,7 @@ pub fn check_root(device: &str, fstype: Option<&str>) -> Result<(), String> {
     klog!("  fsck: checking {} with {}", device, fsck_bin);
     let t = Instant::now();
 
-    // -a: auto-repair without questions
-    // -T: don't show title
-    // -C: show progress (to /dev/console if possible)
+    // -a repairs without asking, -T drops the title
     let mut args = vec!["-a", "-T"];
     if let Some(ft) = fstype {
         args.push("-t");
@@ -128,10 +90,7 @@ pub fn check_root(device: &str, fstype: Option<&str>) -> Result<(), String> {
     }
 }
 
-/// Attempt fsck and handle reboot-required by issuing a system reboot.
-///
-/// Call this from main.rs instead of `check_root` if you want automatic
-/// reboot on code=2 (repairs that require a restart to complete).
+/// Like check_root, but reboots when fsck says the repair needs it (exit code 2).
 #[allow(dead_code)]
 pub fn check_root_or_reboot(device: &str, fstype: Option<&str>) {
     match check_root(device, fstype) {
@@ -151,13 +110,7 @@ pub fn check_root_or_reboot(device: &str, fstype: Option<&str>) {
     }
 }
 
-// Btrfs subvolume mount
-
-/// Mount a Btrfs filesystem at `target`, honouring the `subvol=` option from
-/// `rootflags=` or `rootfstype=btrfs` + `rootflags=subvol=@`.
-///
-/// This is called by `rootfs::mount_root_at` when fstype=btrfs. Example
-/// cmdline: `root=UUID=abc123 rootfstype=btrfs rootflags=subvol=@,compress=zstd`.
+/// Mounts a Btrfs root at `target` with the subvol= from rootflags=.
 pub fn mount_btrfs_subvol(
     device: &str,
     target: &str,
@@ -180,8 +133,6 @@ pub fn mount_btrfs_subvol(
     klog!("  ✓ btrfs subvolume mounted");
     Ok(())
 }
-
-// Helpers
 
 fn find_fsck_binary(fstype: Option<&str>) -> Option<String> {
     // First try fsck.<type> (e.g. fsck.ext4, fsck.xfs)

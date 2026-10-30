@@ -1,15 +1,4 @@
-//! Boot-time syshub upgrade apply: `zex syshub -u` only stages into `.syshub-pending`;
-//! the base is changed here, before the overlay is mounted, so the base never moves under a live overlay.
-//!
-//! On the installed disk (`<zairoot>/overlayer/`):
-//!   `.syshub-pending/`   root 0700, immutable while waiting
-//!       `root/<path>`    staged files
-//!       `manifest`       `f\tmode\tsha256\tpath` | `l\ttarget\tpath` | `d\tmode\tpath`
-//!       `READY`          txn id, written last by zex
-//!       `ROLLBACK`       request to undo the last applied upgrade
-//!   `.syshub-rollback/<txn>/`  root 0700, never visible at runtime
-//!       `journal`        `B|N|D|U\tpath` lines, `COMMIT` last
-//!       `files/<path>`   old base files, `union/<path>` union copies moved out of the way
+//! Applies a staged base upgrade at boot, before the overlay is mounted, so the base never moves under a running system.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};

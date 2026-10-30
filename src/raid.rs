@@ -1,29 +1,8 @@
-/// MD RAID assembly + LVM activation in initramfs
-///
-/// # MD RAID (Linux Software RAID)
-///
-/// Assembles MD arrays before mounting the root filesystem.
-/// Uses the `mdadm` binary if present, otherwise uses direct sysfs/ioctl approach.
-///
-/// Cmdline: `rd.md=1` (enable), `rd.md.uuid=<uuid>` (specific array)
-///
-/// # LVM (Logical Volume Manager)
-///
-/// Activates LVM volume groups after MD RAID assembly.
-/// Uses `lvm vgchange -ay` if available.
-///
-/// Cmdline: `rd.lvm=1` (enable), `rd.lvm.vg=<name>` (specific VG)
-///
-/// # Device Multipath
-///
-/// Activates dm-multipath for redundant storage paths.
-/// Cmdline: `rd.multipath=1`
+/// Assembles MD RAID arrays (rd.md=1) and activates LVM volume groups before the root is mounted.
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
-
-// MD RAID
 
 const MDADM_BINS: &[&str] = &[
     "/sbin/mdadm", "/usr/sbin/mdadm", "/bin/mdadm",
@@ -31,10 +10,7 @@ const MDADM_BINS: &[&str] = &[
 ];
 const SYSFS_MD_DIR: &str = "/sys/class/block";
 
-/// Assemble all MD RAID arrays.
-///
-/// Tries `mdadm --assemble --scan` first.
-/// Falls back to sysfs-based assembly (write "check" to md/sync_action).
+/// Assembles MD arrays with mdadm --assemble --scan, or through sysfs without it.
 pub fn assemble_raid(uuid_filter: Option<&str>) -> Result<usize, String> {
     let mdadm = find_bin(MDADM_BINS);
 
@@ -124,8 +100,6 @@ pub fn wait_for_raid_sync(timeout: Duration) -> bool {
     }
 }
 
-// LVM
-
 const LVM_BINS: &[&str] = &[
     "/sbin/lvm",
     "/usr/sbin/lvm",
@@ -137,9 +111,7 @@ const LVM_BINS: &[&str] = &[
     "/overlayer/syshub/bin/vgchange",
 ];
 
-/// Activate LVM volume groups.
-///
-/// `vg_filter`: if Some, activate only that VG; if None, activate all.
+/// Activates the LVM volume group `vg_filter`, or all of them.
 pub fn activate_lvm(vg_filter: Option<&str>) -> Result<usize, String> {
     let lvm = find_bin(LVM_BINS).ok_or_else(|| "lvm/vgchange not found".to_string())?;
 
@@ -195,8 +167,6 @@ fn count_active_lvs() -> usize {
     }
 }
 
-// Device Multipath
-
 const MULTIPATH_BINS: &[&str] = &[
     "/sbin/multipath", "/usr/sbin/multipath",
     "/overlayer/syshub/sbin/multipath", "/overlayer/syshub/bin/multipath",
@@ -234,8 +204,6 @@ pub fn activate_multipath() -> Result<(), String> {
     }
 }
 
-// Stratis pool unlock
-
 const STRATIS_BINS: &[&str] = &[
     "/usr/sbin/stratis-min", "/usr/sbin/stratis",
     "/overlayer/syshub/sbin/stratis-min", "/overlayer/syshub/bin/stratis-min",
@@ -264,8 +232,6 @@ pub fn unlock_stratis_pool(pool_uuid: Option<&str>) -> Result<(), String> {
         ))
     }
 }
-
-// Helper
 
 fn find_bin(candidates: &[&str]) -> Option<String> {
     candidates

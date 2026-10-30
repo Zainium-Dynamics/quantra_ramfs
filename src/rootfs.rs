@@ -247,9 +247,12 @@ pub fn mount_live_root(
     fs::create_dir_all(mount_target)
         .map_err(|e| format!("create '{}' failed: {}", mount_target, e))?;
 
-    let image_str = image_path
-        .to_str()
-        .ok_or_else(|| format!("live image path is not valid UTF-8: {}", image_path.display()))?;
+    let image_str = image_path.to_str().ok_or_else(|| {
+        format!(
+            "live image path is not valid UTF-8: {}",
+            image_path.display()
+        )
+    })?;
 
     let loop_device = setup_loop_ioctl(image_str)?;
 
@@ -269,7 +272,9 @@ pub fn mount_live_root(
 
     klog!(
         "  Mounting live image {} ({}) → {}",
-        loop_device, mount_fstype, mount_target
+        loop_device,
+        mount_fstype,
+        mount_target
     );
     mount(
         Some(loop_device.as_str()),
@@ -278,7 +283,12 @@ pub fn mount_live_root(
         MsFlags::MS_RDONLY,
         None::<&str>,
     )
-    .map_err(|e| format!("mount live root {} failed: {} (device: {})", mount_fstype, e, loop_device))?;
+    .map_err(|e| {
+        format!(
+            "mount live root {} failed: {} (device: {})",
+            mount_fstype, e, loop_device
+        )
+    })?;
 
     klog!("  ✓ Live root mounted to {}", mount_target);
     Ok(())
@@ -388,7 +398,8 @@ fn setup_loop_ioctl(image_path: &str) -> Result<String, String> {
     let loop_dev_path = format!("/dev/loop{}", loop_num);
     klog!(
         "  LOOP_CTL_GET_FREE → {} (device #{})",
-        loop_dev_path, loop_num
+        loop_dev_path,
+        loop_num
     );
 
     // Step 3: Open /dev/loopN
@@ -481,7 +492,8 @@ fn setup_loop_device(
     // Step 1: Mount ISO9660 device
     klog!(
         "  Step 1: Mounting ISO device {} to {}...",
-        root_device, iso_mount_path
+        root_device,
+        iso_mount_path
     );
     fs::create_dir_all(iso_mount_path).map_err(|_| "create ISO mount dir failed")?;
 
@@ -667,18 +679,22 @@ fn open_luks_with_passphrase(
 
     // Find cryptsetup
     const CRYPTSETUP_BINS: &[&str] = &[
-        "/sbin/cryptsetup", "/usr/sbin/cryptsetup",
-        "/overlayer/syshub/sbin/cryptsetup", "/overlayer/syshub/bin/cryptsetup",
+        "/sbin/cryptsetup",
+        "/usr/sbin/cryptsetup",
+        "/overlayer/syshub/sbin/cryptsetup",
+        "/overlayer/syshub/bin/cryptsetup",
     ];
     let cryptsetup = CRYPTSETUP_BINS
         .iter()
         .find(|p| std::path::Path::new(p).exists())
         .copied()
-        .ok_or_else(|| format!(
-            "cryptsetup not found (checked {}). \
+        .ok_or_else(|| {
+            format!(
+                "cryptsetup not found (checked {}). \
              Install cryptsetup in initramfs or compile with dm-crypt ioctl support.",
-            CRYPTSETUP_BINS.join(", ")
-        ))?;
+                CRYPTSETUP_BINS.join(", ")
+            )
+        })?;
 
     let mut child = Command::new(cryptsetup)
         .args(["luksOpen", "--key-file=-", "--batch-mode", device, name])

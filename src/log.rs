@@ -49,7 +49,10 @@ fn plain(text: &str) -> String {
     } else {
         text.to_string()
     };
-    text.replace(" ✓ ", " ").replace('→', "->").replace('←', "<-").replace('—', "-")
+    text.replace(" ✓ ", " ")
+        .replace('→', "->")
+        .replace('←', "<-")
+        .replace('—', "-")
 }
 
 /// Quiet boot: our lines and every child's stdout/stderr go to the kernel log (dmesg, journal).

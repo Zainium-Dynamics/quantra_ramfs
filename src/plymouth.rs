@@ -8,13 +8,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static PLYMOUTH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 const PLYMOUTHD_BINS: &[&str] = &[
-    "/usr/sbin/plymouthd", "/sbin/plymouthd",
-    "/overlayer/syshub/sbin/plymouthd", "/overlayer/syshub/bin/plymouthd",
+    "/usr/sbin/plymouthd",
+    "/sbin/plymouthd",
+    "/overlayer/syshub/sbin/plymouthd",
+    "/overlayer/syshub/bin/plymouthd",
 ];
 
 const PLYMOUTH_BINS: &[&str] = &[
-    "/usr/bin/plymouth", "/bin/plymouth",
-    "/overlayer/syshub/bin/plymouth", "/overlayer/syshub/sbin/plymouth",
+    "/usr/bin/plymouth",
+    "/bin/plymouth",
+    "/overlayer/syshub/bin/plymouth",
+    "/overlayer/syshub/sbin/plymouth",
 ];
 
 /// Starts the Plymouth splash; without plymouthd the boot just goes on.
@@ -157,8 +161,10 @@ pub fn setup_kms_framebuffer() {
 
     // Try to load vgem (virtual GPU — works without real GPU for basic splash)
     let modprobe = find_bin(&[
-        "/sbin/modprobe", "/usr/sbin/modprobe",
-        "/overlayer/syshub/sbin/modprobe", "/overlayer/syshub/bin/modprobe",
+        "/sbin/modprobe",
+        "/usr/sbin/modprobe",
+        "/overlayer/syshub/sbin/modprobe",
+        "/overlayer/syshub/bin/modprobe",
     ]);
     if let Some(mp) = modprobe {
         std::process::Command::new(&mp).arg("vgem").status().ok();
@@ -313,7 +319,9 @@ pub fn mount_sysext(image_path: &str, mount_point: &str) -> Result<(), String> {
             if out.status.success() {
                 klog!(
                     "  sysext: mounted {} → {} ({})",
-                    image_path, mount_point, fstype
+                    image_path,
+                    mount_point,
+                    fstype
                 );
                 return Ok(());
             }
@@ -328,10 +336,13 @@ pub fn mount_sysext(image_path: &str, mount_point: &str) -> Result<(), String> {
 /// Import a ZFS pool and return the root dataset path.
 pub fn import_zfs_pool(pool_name: Option<&str>) -> Result<String, String> {
     let zpool = find_bin(&[
-        "/sbin/zpool", "/usr/sbin/zpool", "/usr/bin/zpool",
-        "/overlayer/syshub/sbin/zpool", "/overlayer/syshub/bin/zpool",
+        "/sbin/zpool",
+        "/usr/sbin/zpool",
+        "/usr/bin/zpool",
+        "/overlayer/syshub/sbin/zpool",
+        "/overlayer/syshub/bin/zpool",
     ])
-        .ok_or_else(|| "zpool not found".to_string())?;
+    .ok_or_else(|| "zpool not found".to_string())?;
 
     let mut cmd = std::process::Command::new(&zpool);
     cmd.args(["import", "-N", "-a"]); // -N: don't mount, -a: import all
@@ -375,10 +386,12 @@ fn get_zfs_bootfs(pool: &str, zpool_bin: &str) -> Result<String, String> {
 /// Mounts a bcachefs filesystem with the bcachefs tool.
 pub fn mount_bcachefs(device: &str, target: &str, opts: Option<&str>) -> Result<(), String> {
     let bcachefs = find_bin(&[
-        "/usr/sbin/bcachefs", "/sbin/bcachefs",
-        "/overlayer/syshub/sbin/bcachefs", "/overlayer/syshub/bin/bcachefs",
+        "/usr/sbin/bcachefs",
+        "/sbin/bcachefs",
+        "/overlayer/syshub/sbin/bcachefs",
+        "/overlayer/syshub/bin/bcachefs",
     ])
-        .ok_or_else(|| "bcachefs tool not found".to_string())?;
+    .ok_or_else(|| "bcachefs tool not found".to_string())?;
 
     let mut cmd = std::process::Command::new(&bcachefs);
     cmd.args(["mount", device, target]);
@@ -446,8 +459,10 @@ pub fn setup_initrd_vconsole() {
         .unwrap_or("us");
 
     let loadkeys = find_bin(&[
-        "/usr/bin/loadkeys", "/bin/loadkeys",
-        "/overlayer/syshub/bin/loadkeys", "/overlayer/syshub/sbin/loadkeys",
+        "/usr/bin/loadkeys",
+        "/bin/loadkeys",
+        "/overlayer/syshub/bin/loadkeys",
+        "/overlayer/syshub/sbin/loadkeys",
     ]);
     if let Some(lk) = loadkeys {
         std::process::Command::new(&lk).arg(keymap).status().ok();

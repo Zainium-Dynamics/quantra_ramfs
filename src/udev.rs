@@ -177,10 +177,19 @@ fn probe_fs_ids(dev: &str) -> Option<(Option<String>, Option<String>)> {
     let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
     let uuid = |b: &[u8]| {
         let h = hex(b);
-        format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+        format!(
+            "{}-{}-{}-{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[12..16],
+            &h[16..20],
+            &h[20..32]
+        )
     };
     let text = |b: &[u8]| {
-        let t = String::from_utf8_lossy(b).trim_end_matches(['\0', ' ']).to_string();
+        let t = String::from_utf8_lossy(b)
+            .trim_end_matches(['\0', ' '])
+            .to_string();
         (!t.is_empty()).then_some(t)
     };
 
@@ -202,8 +211,15 @@ fn probe_fs_ids(dev: &str) -> Option<(Option<String>, Option<String>)> {
     }
     // vfat: FAT32 boot sector, else FAT12/16
     if at(0x1fe, 2) == Some(&[0x55, 0xaa]) {
-        let (id_off, label_off) = if at(0x52, 5) == Some(b"FAT32") { (0x43, 0x47) } else if at(0x36, 3) == Some(b"FAT") { (0x27, 0x2b) } else { return None };
-        let id = at(id_off, 4).map(|b| format!("{:02X}{:02X}-{:02X}{:02X}", b[3], b[2], b[1], b[0]));
+        let (id_off, label_off) = if at(0x52, 5) == Some(b"FAT32") {
+            (0x43, 0x47)
+        } else if at(0x36, 3) == Some(b"FAT") {
+            (0x27, 0x2b)
+        } else {
+            return None;
+        };
+        let id =
+            at(id_off, 4).map(|b| format!("{:02X}{:02X}-{:02X}{:02X}", b[3], b[2], b[1], b[0]));
         let label = at(label_off, 11).and_then(text).filter(|l| l != "NO NAME");
         return Some((id, label));
     }
@@ -365,4 +381,3 @@ fn poll_device(path: &str, timeout: Duration) -> bool {
     }
     std::path::Path::new(path).exists()
 }
-

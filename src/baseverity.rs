@@ -35,7 +35,9 @@ pub fn enable(path: &Path) -> io::Result<bool> {
     let fd = f.as_raw_fd();
     let mut flags: libc::c_long = 0;
     // SAFETY: fd is open for the lifetime of `f`; FS_IOC_GETFLAGS writes one long into `flags`.
-    if unsafe { libc::ioctl(fd, FS_IOC_GETFLAGS as _, &mut flags) } == 0 && flags & FS_VERITY_FL != 0 {
+    if unsafe { libc::ioctl(fd, FS_IOC_GETFLAGS as _, &mut flags) } == 0
+        && flags & FS_VERITY_FL != 0
+    {
         return Ok(false);
     }
     let arg = EnableArg {
@@ -62,7 +64,10 @@ pub fn enable(path: &Path) -> io::Result<bool> {
 
 /// The filesystem cannot do fs-verity at all (no `verity` feature, or not ext4/btrfs/f2fs).
 fn unsupported(e: &io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(libc::EOPNOTSUPP) | Some(libc::ENOTTY) | Some(libc::EINVAL))
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EOPNOTSUPP) | Some(libc::ENOTTY) | Some(libc::EINVAL)
+    )
 }
 
 /// Installed disk only: seal the whole base once. Later upgrades seal their own files.
@@ -82,7 +87,9 @@ pub fn ensure_base(zairoot: &str) {
             Ok(true) => sealed += 1,
             Ok(false) => {}
             Err(e) if unsupported(&e) => {
-                klog!("  ⚠ fs-verity: not available on this filesystem ({e}); base files stay writable by root");
+                klog!(
+                    "  ⚠ fs-verity: not available on this filesystem ({e}); base files stay writable by root"
+                );
                 crate::plymouth::hide_message(SEALING);
                 return;
             }
@@ -98,7 +105,10 @@ pub fn ensure_base(zairoot: &str) {
     if failed == 0 {
         let _ = fs::write(z.join(MARKER), format!("{}\n", files.len()));
     }
-    klog!("  ✓ fs-verity: {sealed} base files sealed ({} total, {failed} failed)", files.len());
+    klog!(
+        "  ✓ fs-verity: {sealed} base files sealed ({} total, {failed} failed)",
+        files.len()
+    );
 }
 
 /// Regular files under `dir`, without following symlinks.

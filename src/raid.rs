@@ -5,8 +5,11 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const MDADM_BINS: &[&str] = &[
-    "/sbin/mdadm", "/usr/sbin/mdadm", "/bin/mdadm",
-    "/overlayer/syshub/sbin/mdadm", "/overlayer/syshub/bin/mdadm",
+    "/sbin/mdadm",
+    "/usr/sbin/mdadm",
+    "/bin/mdadm",
+    "/overlayer/syshub/sbin/mdadm",
+    "/overlayer/syshub/bin/mdadm",
 ];
 const SYSFS_MD_DIR: &str = "/sys/class/block";
 
@@ -119,8 +122,10 @@ pub fn activate_lvm(vg_filter: Option<&str>) -> Result<usize, String> {
 
     // Try vgscan first to update metadata cache
     let vgscan = find_bin(&[
-        "/sbin/vgscan", "/usr/sbin/vgscan",
-        "/overlayer/syshub/sbin/vgscan", "/overlayer/syshub/bin/vgscan",
+        "/sbin/vgscan",
+        "/usr/sbin/vgscan",
+        "/overlayer/syshub/sbin/vgscan",
+        "/overlayer/syshub/bin/vgscan",
     ]);
     if let Some(vs) = vgscan {
         Command::new(&vs).args(["--mknodes"]).status().ok();
@@ -168,12 +173,16 @@ fn count_active_lvs() -> usize {
 }
 
 const MULTIPATH_BINS: &[&str] = &[
-    "/sbin/multipath", "/usr/sbin/multipath",
-    "/overlayer/syshub/sbin/multipath", "/overlayer/syshub/bin/multipath",
+    "/sbin/multipath",
+    "/usr/sbin/multipath",
+    "/overlayer/syshub/sbin/multipath",
+    "/overlayer/syshub/bin/multipath",
 ];
 const MULTIPATHD_BINS: &[&str] = &[
-    "/sbin/multipathd", "/usr/sbin/multipathd",
-    "/overlayer/syshub/sbin/multipathd", "/overlayer/syshub/bin/multipathd",
+    "/sbin/multipathd",
+    "/usr/sbin/multipathd",
+    "/overlayer/syshub/sbin/multipathd",
+    "/overlayer/syshub/bin/multipathd",
 ];
 
 /// Activate device-mapper multipath.
@@ -205,9 +214,12 @@ pub fn activate_multipath() -> Result<(), String> {
 }
 
 const STRATIS_BINS: &[&str] = &[
-    "/usr/sbin/stratis-min", "/usr/sbin/stratis",
-    "/overlayer/syshub/sbin/stratis-min", "/overlayer/syshub/bin/stratis-min",
-    "/overlayer/syshub/sbin/stratis", "/overlayer/syshub/bin/stratis",
+    "/usr/sbin/stratis-min",
+    "/usr/sbin/stratis",
+    "/overlayer/syshub/sbin/stratis-min",
+    "/overlayer/syshub/bin/stratis-min",
+    "/overlayer/syshub/sbin/stratis",
+    "/overlayer/syshub/bin/stratis",
 ];
 
 /// Unlock a Stratis storage pool in the initramfs.

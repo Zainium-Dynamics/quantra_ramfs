@@ -48,7 +48,9 @@ impl DhcpLease {
     pub fn apply(&self) -> Result<(), String> {
         klog!(
             "  dhcp: applying lease ip={} gw={:?} on {}",
-            self.ip, self.gateway, self.iface
+            self.ip,
+            self.gateway,
+            self.iface
         );
 
         // ip addr add <ip>/<prefix> dev <iface>
@@ -160,7 +162,9 @@ pub fn dhcp_acquire(iface: &str, timeout: Duration) -> Result<DhcpLease, String>
                 if let Some(lease) = parse_dhcp_reply(&buf[..n], xid, iface, DHCP_MSG_ACK) {
                     klog!(
                         "  dhcp: ACK lease={} mask={} gw={:?}",
-                        lease.ip, lease.subnet_mask, lease.gateway
+                        lease.ip,
+                        lease.subnet_mask,
+                        lease.gateway
                     );
                     return Ok(lease);
                 }
@@ -370,8 +374,11 @@ fn mask_to_prefix(mask: Ipv4Addr) -> u32 {
 
 fn run_ip(args: &[&str]) -> Result<(), String> {
     let ip_bins = &[
-        "/sbin/ip", "/usr/sbin/ip", "/bin/ip",
-        "/overlayer/syshub/sbin/ip", "/overlayer/syshub/bin/ip",
+        "/sbin/ip",
+        "/usr/sbin/ip",
+        "/bin/ip",
+        "/overlayer/syshub/sbin/ip",
+        "/overlayer/syshub/bin/ip",
     ];
     let bin = ip_bins
         .iter()
@@ -442,8 +449,10 @@ impl Default for IscsiTarget {
 /// Connect to an iSCSI target and return the block device path.
 pub fn connect_iscsi(target: &IscsiTarget) -> Result<String, String> {
     let iscsistart = &[
-        "/sbin/iscsistart", "/usr/sbin/iscsistart",
-        "/overlayer/syshub/sbin/iscsistart", "/overlayer/syshub/bin/iscsistart",
+        "/sbin/iscsistart",
+        "/usr/sbin/iscsistart",
+        "/overlayer/syshub/sbin/iscsistart",
+        "/overlayer/syshub/bin/iscsistart",
     ];
     let bin = iscsistart
         .iter()
@@ -452,7 +461,9 @@ pub fn connect_iscsi(target: &IscsiTarget) -> Result<String, String> {
 
     klog!(
         "  iscsi: connecting to {} at {}:{}",
-        target.target_iqn, target.target_ip, target.target_port
+        target.target_iqn,
+        target.target_ip,
+        target.target_port
     );
 
     let output = Command::new(bin)

@@ -1,16 +1,4 @@
-/// Boot phase tracking — atomic progress indicator + TPM2 measured boot
-///
-/// Every `set_phase()` call does two things atomically:
-/// 1. Stores the new phase number into `BOOT_PHASE` (SeqCst)
-/// 2. Extends TPM2 PCR[8] with the phase measurement (if TPM2 is present)
-///
-/// # Phase sequence
-///
-/// Numbered 0 through 7: INIT (binary started), MOUNTS (/proc /sys /dev
-/// /run mounted), CMDLINE (/proc/cmdline parsed), ROOTFS_DETECT (root
-/// block device resolved), ROOTFS_MOUNT (disk mounted to /zairoot),
-/// OVERLAY (OverlayFS assembled into /new_root), PIVOT (pivot_root +
-/// execv), COMPLETE (execv issued). See `BootPhase`'s constants below.
+/// Boot phase tracking: each set_phase() stores the phase and extends TPM2 PCR 8 with it.
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub struct BootPhase;
@@ -44,8 +32,7 @@ impl BootPhase {
 /// Global atomic boot phase — readable by watchdogs / monitoring tools.
 pub static BOOT_PHASE: AtomicU32 = AtomicU32::new(0);
 
-/// Advance to `phase` and log the transition.
-/// Also extends TPM2 PCR[8] with the phase measurement (non-fatal if absent).
+/// Moves to `phase`, logs it and measures it into PCR 8 when a TPM is present.
 #[inline]
 pub fn set_phase(phase: u32) {
     BOOT_PHASE.store(phase, Ordering::SeqCst);

@@ -17,11 +17,7 @@ const PLYMOUTH_BINS: &[&str] = &[
     "/overlayer/syshub/bin/plymouth", "/overlayer/syshub/sbin/plymouth",
 ];
 
-// Public API
-
-/// Start Plymouth splash screen.
-///
-/// Non-fatal — if plymouthd is absent or fails, boot continues silently.
+/// Starts the Plymouth splash; without plymouthd the boot just goes on.
 pub fn start(theme: Option<&str>) -> bool {
     if !is_enabled() {
         return false;
@@ -95,8 +91,7 @@ pub fn update_status(status: &str) {
     run_plymouth(&["update", &format!("--status={}", status)]);
 }
 
-/// Notify Plymouth that the root filesystem is mounted.
-/// Call this just before pivot_root.
+/// Tells Plymouth the root is mounted; call right before pivot_root.
 pub fn root_mounted() {
     if !PLYMOUTH_ACTIVE.load(Ordering::Relaxed) {
         return;
@@ -105,10 +100,7 @@ pub fn root_mounted() {
     klog!("  plymouth: root-mounted signal sent");
 }
 
-/// Handoff Plymouth to the new init after pivot_root.
-///
-/// Writes the handoff socket path to /run/plymouth/handoff
-/// so the new PID 1 can continue the splash.
+/// Hands the splash to the new init after pivot_root.
 pub fn handoff_to_init() {
     if !PLYMOUTH_ACTIVE.load(Ordering::Relaxed) {
         return;
@@ -143,12 +135,7 @@ pub fn is_enabled() -> bool {
     cmdline.split_whitespace().any(|t| t == "splash")
 }
 
-// KMS Framebuffer setup
-
-/// Setup KMS (Kernel Mode Setting) framebuffer for Plymouth.
-///
-/// Loads the vgem DRM driver if no other DRM device is present.
-/// Creates /dev/dri directory for DRM device nodes.
+/// Loads vgem when no DRM device exists and creates /dev/dri for Plymouth.
 pub fn setup_kms_framebuffer() {
     // Create /dev/dri if not present
     fs::create_dir_all("/dev/dri").ok();
@@ -190,8 +177,7 @@ pub fn setup_kms_framebuffer() {
     }
 }
 
-/// plymouthd only draws on display devices udev has initialized and tagged `seat`; there is no
-/// udevd in the initramfs, so record the present ones the way udevd would (it rewrites them later).
+/// Marks the display devices as udev would (tagged seat), since plymouthd only draws on those.
 fn register_display_devices() {
     // udev stamps the initialization time in CLOCK_MONOTONIC microseconds
     let mut ts = libc::timespec {
@@ -235,17 +221,7 @@ fn dri_device_exists() -> bool {
         || Path::new("/dev/fb0").exists()
 }
 
-// PKCS#11 token unlock
-
-/// Attempt LUKS unlock via PKCS#11 token (YubiKey, smart card, etc.)
-///
-/// Reads the PKCS#11 URI from cmdline `rd.luks.pkcs11-uri=` and uses
-/// `p11-kit` to obtain the key. systemd's own `libcryptsetup` support is
-/// disabled in our build (kept minimal — no published runtime lib for it
-/// yet), so there's no `systemd-cryptsetup` binary to try either; this
-/// only ever goes through p11-kit.
-///
-/// Non-fatal — falls through to passphrase on failure.
+/// Unlocks LUKS with a PKCS#11 token (rd.luks.pkcs11-uri=) through p11-kit.
 pub fn pkcs11_unlock_luks(device: &str, name: &str, pkcs11_uri: &str) -> Result<(), String> {
     klog!("  pkcs11: attempting LUKS unlock via {}", pkcs11_uri);
 
@@ -289,22 +265,14 @@ fn unlock_luks_with_key(device: &str, name: &str, key: &[u8]) -> Result<(), Stri
     }
 }
 
-// Credential directory from UEFI variables
-
-/// Read encrypted credentials from UEFI variables (EFI variables).
-///
-/// systemd-cryptenroll can store credentials in UEFI variables.
-/// This reads from /sys/firmware/efi/efivars/.
-///
-/// Returns the decrypted credential bytes, or Err if not available.
+/// Reads a systemd credential stored in a UEFI variable.
 pub fn read_uefi_credential(name: &str) -> Result<Vec<u8>, String> {
     let efi_vars_dir = "/sys/firmware/efi/efivars";
     if !Path::new(efi_vars_dir).exists() {
         return Err("EFI variables not available (non-UEFI boot?)".to_string());
     }
 
-    // systemd credential UEFI variable name format:
-    // "credential.NAME-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+    // systemd names them credential.NAME-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
     let var_prefix = format!("credential.{}", name);
     let entries = fs::read_dir(efi_vars_dir).map_err(|e| format!("read efivars: {}", e))?;
 
@@ -327,15 +295,7 @@ pub fn read_uefi_credential(name: &str) -> Result<Vec<u8>, String> {
     Err(format!("UEFI credential '{}' not found", name))
 }
 
-// Sysext / Confext images
-
-/// Mount a system extension (sysext) image.
-///
-/// Sysext images extend /usr and /opt in the running system.
-/// Used by systemd to modularly extend an immutable OS.
-/// For Zainium this maps to zexlib but we support the format.
-///
-/// Image format: squashfs or ext4 with `/usr/lib/extension-release.d/` marker.
+/// Mounts a system extension image (squashfs or ext4 with an extension-release marker).
 pub fn mount_sysext(image_path: &str, mount_point: &str) -> Result<(), String> {
     if !Path::new(image_path).exists() {
         return Err(format!("sysext image not found: {}", image_path));
@@ -364,8 +324,6 @@ pub fn mount_sysext(image_path: &str, mount_point: &str) -> Result<(), String> {
         image_path
     ))
 }
-
-// ZFS pool import
 
 /// Import a ZFS pool and return the root dataset path.
 pub fn import_zfs_pool(pool_name: Option<&str>) -> Result<String, String> {
@@ -414,11 +372,7 @@ fn get_zfs_bootfs(pool: &str, zpool_bin: &str) -> Result<String, String> {
     }
 }
 
-// bcachefs mount
-
-/// Mount a bcachefs filesystem.
-///
-/// bcachefs requires special mount handling via the `bcachefs` tool.
+/// Mounts a bcachefs filesystem with the bcachefs tool.
 pub fn mount_bcachefs(device: &str, target: &str, opts: Option<&str>) -> Result<(), String> {
     let bcachefs = find_bin(&[
         "/usr/sbin/bcachefs", "/sbin/bcachefs",
@@ -447,13 +401,7 @@ pub fn mount_bcachefs(device: &str, target: &str, opts: Option<&str>) -> Result<
     }
 }
 
-// Secure Boot UKI check
-
-/// Verify Secure Boot state and UKI (Unified Kernel Image) signature.
-///
-/// Reads SecureBoot EFI variable and reports status.
-/// The actual UKI signature verification is done by the UEFI firmware;
-/// by the time we're in the initramfs, Secure Boot is already enforced.
+/// Reports the Secure Boot state; the firmware has already checked the signatures.
 pub fn check_secure_boot() -> SecureBootStatus {
     let sb_var = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
     let mok_var = "/sys/firmware/efi/efivars/MokSecureBoot-605dab50-e046-4300-abb6-3dd810dd8b23";
@@ -488,12 +436,7 @@ pub enum SecureBootStatus {
     NonUEFI,
 }
 
-// vconsole in initramfs
-
-/// Apply console keymap in initramfs (before pivot_root).
-///
-/// Reads KEYMAP from `rd.vconsole.keymap=` cmdline or
-/// `/overlayer/syshub/etc/quantra-system/vconsole.conf`.
+/// Loads the console keymap from rd.vconsole.keymap= (default us) before pivot_root.
 pub fn setup_initrd_vconsole() {
     // Check cmdline for keymap override
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
@@ -511,8 +454,6 @@ pub fn setup_initrd_vconsole() {
         klog!("  vconsole: keymap '{}' applied", keymap);
     }
 }
-
-// Helper
 
 fn find_bin(candidates: &[&str]) -> Option<String> {
     candidates

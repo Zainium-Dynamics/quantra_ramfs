@@ -1,57 +1,4 @@
-//! Root filesystem switching — OverlayFS-aware pivot_root + init discovery
-//!
-//! # Architecture
-//!
-//! Boot flow as seen by this module: the physical disk partition gets
-//! mounted at `/zairoot` (Phase 4), the OverlayFS merged view lands at
-//! `/new_root` (Phase 4.5), `pivot_root` makes `/new_root` become `/`
-//! (Phase 6), and `execv` hands control to init — PID 1 takes over.
-//!
-//! After OverlayFS is mounted, `discover_boot_target` searches `/new_root`
-//! for the init binary. `pivot_to_root` then hard-wires to `/new_root` as the
-//! switch target regardless of where the physical disk was mounted.
-//!
-//! # Mount Target Priority  (physical disk, Phase 4)
-//!
-//! Tried in order: `/zairoot` (Zainium OS's own preferred path), `/mnt/root`
-//! (standard Linux initramfs — Arch, Gentoo, …), `/sysroot` (systemd initrd
-//! compatibility — Fedora, RHEL, …), `/newroot` (BusyBox-style initramfs).
-//!
-//! # Init Binary Priority  (inside /new_root, Phase 5)
-//!
-//! Paths below are relative to `/new_root`. Under Zainium's "Option B"
-//! architecture (see `overlay.rs`), the OverlayFS merge of `overlayer/syshub`
-//! and `overlayer/zaisys` lands at `/new_root/overlayer/syshub`, **not** at
-//! `/new_root` itself — there is no flattened `/bin`, `/sbin`, `/usr` at the
-//! tmpfs root. Zainium-native candidates (Phase 1, Phase 3) are therefore
-//! prefixed with `/overlayer/syshub`. Phase 2 is the exception: it exists to
-//! chainload a *foreign* Linux disk that never went through
-//! `overlay::mount_overlay` at all (its `overlayer/syshub` sanity check
-//! failed, so `new_root` falls back to the raw physical mount with a normal
-//! FHS layout) — those candidates stay unprefixed on purpose.
-//!
-//! Phase 1, Zainium OS core, is tried first: `/overlayer/syshub/lib/systemd/systemd`
-//! (systemd, built with `--prefix=/overlayer/syshub` — `quantra`'s own PID 1
-//! isn't yet reliable, so this now outranks it), then
-//! `/overlayer/syshub/engine/quantra` (kept as a fallback until it's fixed),
-//! then `/overlayer/syshub/engine/s6-quantra` (the s6-based fallback).
-//!
-//! Phase 2, standard Linux compatibility, only ever matches a foreign disk
-//! with no `overlayer/syshub`: `/sbin/init` (Debian/Ubuntu/Arch/Gentoo),
-//! `/usr/lib/systemd/systemd` (Fedora/RHEL/openSUSE), `/lib/systemd/systemd`
-//! (Debian's alternate systemd path), `/usr/sbin/init` (some BSDs / older
-//! distros).
-//!
-//! Phase 3, emergency rescue shells shipped inside syshub, is the last
-//! resort: `/overlayer/syshub/bin/fish` (colours, autocompletion),
-//! `/overlayer/syshub/bin/bash` (standard rescue shell — Zainium has no
-//! `/bin/sh`), `/overlayer/syshub/bin/zsh` (alternative rescue shell).
-//!
-//! This same prefixing makes the `zainium.overlay=off` / OverlayFS-mount-
-//! failure fallback work for free: in both cases `new_root` becomes
-//! `/zairoot` directly, which — being the real Zainium disk — already has
-//! `overlayer/syshub` as a genuine subdirectory, so `{new_root}/overlayer/syshub/engine/quantra`
-//! resolves correctly without any special-casing here.
+//! Switches to the new root: moves the virtual filesystems, pivot_root, then execs init.
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
 use nix::unistd::{chdir, chroot, execv, pivot_root};
 use std::ffi::CString;
@@ -60,10 +7,7 @@ use std::path::Path;
 
 use crate::cmdline::Cmdline;
 
-// Constants
-
-/// Physical disk mount targets tried in priority order.
-/// The first directory that can be created (or already exists) is used.
+/// Where the physical disk is mounted, first usable one wins.
 const MOUNT_TARGETS: &[&str] = &[
     "/zairoot",  // Zainium OS preferred
     "/mnt/root", // Standard Linux initramfs (Arch, Gentoo, …)
@@ -71,58 +15,31 @@ const MOUNT_TARGETS: &[&str] = &[
     "/newroot",  // BusyBox-style initramfs
 ];
 
-/// Init binaries searched inside the merged `/new_root`, in priority order.
-/// Zainium-native candidates (Phase 1, Phase 3) are relative to `/new_root`
-/// but carry an explicit `/overlayer/syshub` prefix, since under "Option B"
-/// (see `overlay.rs`) that is where the OverlayFS merge actually lands — the
-/// tmpfs root itself has no `bin/`, `sbin/`, `usr/`. Phase 2 candidates stay
-/// unprefixed: they only ever match when `new_root` is a foreign, non-Zainium
-/// disk mounted with a plain FHS layout (see module doc comment above).
+/// Init binaries looked for in the merged root: systemd, a foreign system's init, a rescue shell.
 const INIT_FALLBACKS: &[&str] = &[
-    // Phase 1: Zainium OS Core
-    "/overlayer/syshub/lib/systemd/systemd", // Zainium PID 1 (systemd)
-    "/overlayer/syshub/engine/quantra",      // Zainium PID 1 (legacy fallback)
-    "/overlayer/syshub/engine/s6-quantra",   // Zainium s6-based fallback
-    // Phase 2: Standard Linux compatibility (foreign disk only)
-    "/sbin/init",               // Debian / Ubuntu / Arch / Gentoo
-    "/usr/lib/systemd/systemd", // Fedora / RHEL / openSUSE
-    "/lib/systemd/systemd",     // Debian systemd alternate path
-    "/usr/sbin/init",           // Some BSDs / older distros
-    // Phase 3: Emergency rescue shells (ship inside syshub)
-    "/overlayer/syshub/bin/fish", // Advanced rescue (colours, autocompletion)
-    "/overlayer/syshub/bin/bash", // Standard rescue shell (Zainium has no /bin/sh)
-    "/overlayer/syshub/bin/zsh",  // Alternative rescue shell
+    "/overlayer/syshub/lib/systemd/systemd",
+    "/sbin/init",
+    "/usr/lib/systemd/systemd",
+    "/lib/systemd/systemd",
+    "/usr/sbin/init",
+    "/overlayer/syshub/bin/fish",
+    "/overlayer/syshub/bin/bash",
+    "/overlayer/syshub/bin/zsh",
 ];
 
-/// Pseudo-filesystem mount points to MS_MOVE into the new root before pivoting.
-/// Order matters: /dev must move before /proc and /sys on some kernels.
+/// Moved into the new root before pivot_root; /dev goes first.
 const MOUNT_MOVE_ORDER: &[&str] = &["/dev", "/proc", "/sys", "/run"];
 
-// Data types
-
-/// Result of the mount + init-discovery phase.
-///
-/// Passed from `discover_boot_target` into `pivot_to_root`.
+/// The mount point and the init that pivot_to_root boots.
 #[derive(Debug)]
 pub struct BootTarget {
-    /// Physical disk mount point (e.g. `/zairoot`).
-    /// Used by `pivot_to_root` only for diagnostics; the actual pivot target
-    /// is always `/new_root` (the OverlayFS merged view).
+    /// Where the physical disk is mounted; the pivot itself always goes to /new_root.
     pub mount_point: &'static str,
-    /// Init binary path relative to root (e.g. `/engine/quantra`).
+    /// Init binary path relative to the root, e.g. /overlayer/syshub/lib/systemd/systemd.
     pub init_path: &'static str,
 }
 
-// Public API
-
-/// Select the physical disk mount point.
-///
-/// Iterates `MOUNT_TARGETS` and returns the first entry whose directory can be
-/// created (or already exists). The directory is created here so the caller can
-/// immediately call `rootfs::mount_root_at` against it.
-///
-/// Returns `None` only if the filesystem is completely read-only and none of
-/// the candidates already exist (pathological initramfs configuration).
+/// First MOUNT_TARGETS entry that exists or can be created.
 pub fn find_mount_target(_cmdline: &Cmdline) -> Option<&'static str> {
     for &target in MOUNT_TARGETS {
         if fs::create_dir_all(target).is_ok() {
@@ -130,18 +47,14 @@ pub fn find_mount_target(_cmdline: &Cmdline) -> Option<&'static str> {
             return Some(target);
         }
     }
-    // All create_dir_all calls failed (read-only tmpfs?) — fall back to
-    // any candidate that already exists.
+    // none could be created: take one that already exists
     MOUNT_TARGETS
         .iter()
         .find(|&&t| Path::new(t).exists())
         .copied()
 }
 
-/// Discover the init binary inside the merged `/new_root`.
-///
-/// Iterates `INIT_FALLBACKS` and returns the relative path of the first entry
-/// that exists at `{new_root}{candidate}`.
+/// First INIT_FALLBACKS entry that exists under `new_root`.
 pub fn find_init_binary(new_root: &str) -> Option<&'static str> {
     for &candidate in INIT_FALLBACKS {
         let full = format!("{}{}", new_root, candidate);
@@ -153,16 +66,9 @@ pub fn find_init_binary(new_root: &str) -> Option<&'static str> {
     None
 }
 
-/// Build a `BootTarget` by auto-discovering or honouring the `init=` cmdline override.
-///
-/// Called after OverlayFS is mounted at `new_root`. At this point `new_root` is
-/// typically `/new_root` (the OverlayFS merged view) or `/zairoot` when overlay
-/// is disabled by cmdline.
+/// Picks the init to boot: init= when it exists, otherwise the first one found.
 pub fn discover_boot_target(cmdline: &Cmdline, new_root: &str) -> BootTarget {
-    // Honour an explicit `init=` cmdline override when the binary exists.
-    // Only taken when the user actually passed init= — with no override,
-    // we always run the full INIT_FALLBACKS auto-discovery below instead of
-    // silently trusting a single hardcoded path.
+    // init= is only used when it was given and the file exists
     if let Some(cmdline_init) = cmdline.init.as_deref() {
         let full = format!("{}{}", new_root, cmdline_init);
         if Path::new(&full).exists() {
@@ -172,9 +78,7 @@ pub fn discover_boot_target(cmdline: &Cmdline, new_root: &str) -> BootTarget {
                 .find(|&&t| Path::new(t).exists())
                 .copied()
                 .unwrap_or(MOUNT_TARGETS[0]);
-            // Map the user-supplied path to a static str from INIT_FALLBACKS if
-            // it matches a known candidate; otherwise fall back to the first entry
-            // so BootTarget keeps its &'static str invariant.
+            // keep a &'static str: use the matching INIT_FALLBACKS entry, or the first one
             let init = INIT_FALLBACKS
                 .iter()
                 .find(|&&i| i == cmdline_init)
@@ -206,27 +110,9 @@ pub fn discover_boot_target(cmdline: &Cmdline, new_root: &str) -> BootTarget {
     }
 }
 
-/// Perform the final `pivot_root` + `execv` transition.
-///
-/// # Steps
-/// 1. MS_MOVE `/dev`, `/proc`, `/sys`, `/run` into `/new_root/`.
-/// 2. `pivot_root("/new_root", "/new_root/.old_root")` — makes `/new_root` the new `/`.
-/// 3. `umount2("/.old_root", MNT_DETACH)` — detaches the physical disk;
-///    `/zairoot` becomes invisible to all new processes.
-/// 4. `execv(init_path, …)` — hands control to Quantra (or the discovered init).
-///
-/// If `pivot_root` fails (e.g. live ISO with read-only squashfs as initramfs root),
-/// `chroot` is used as a fallback — this covers `zainium.overlay=off` + live ISO.
-///
-/// # Errors
-/// Returns `Err` only if MS_MOVE, chdir, or execv fails. Never returns on success.
+/// Moves /dev, /proc, /sys and /run in, pivots to /new_root, detaches the old root and execs init.
 pub fn pivot_to_root(target: &BootTarget) -> Result<(), String> {
-    // The OverlayFS layer always mounts at /new_root. When overlay is disabled,
-    // main.rs sets new_root = zairoot (string), but pivot_to_root must still pivot
-    // to /new_root if it was created, else fall through to chroot on target.mount_point.
-    //
-    // Strategy: prefer /new_root if it exists (OverlayFS case), otherwise use
-    // the physical mount_point directly (overlay-disabled case).
+    // the overlay is always at /new_root; without it, boot the physical mount point
     let new_root = if Path::new("/new_root").exists() {
         "/new_root"
     } else {
@@ -234,11 +120,7 @@ pub fn pivot_to_root(target: &BootTarget) -> Result<(), String> {
     };
     let init_rel = target.init_path;
 
-    // pivot_root requires new_root to be a real mount point -- /new_root
-    // is just a plain directory on the initramfs's own root fs (only its
-    // subdirs are real mounts), so pivot_root was failing with EBUSY
-    // ("new_root is on the current root filesystem"). Self-bind-mount
-    // makes it one.
+    // pivot_root needs a mount point: bind /new_root onto itself
     mount(Some(new_root), new_root, None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REC, None::<&str>)
         .map_err(|e| format!("self-bind-mount {}: {}", new_root, e))?;
 
@@ -291,21 +173,12 @@ pub fn pivot_to_root(target: &BootTarget) -> Result<(), String> {
         klog!("  ✓ chroot fallback complete");
     }
 
-    // Zainium-native init candidates run under /overlayer/syshub — inject
-    // sys_resolver's LD_PRELOAD shim into our own environment here, right
-    // before execv, so the successor process inherits it from its very
-    // first instruction. This used to be quantra's job (reading
-    // oxienv.toml after it took over as PID 1), but quantra is no longer
-    // guaranteed to be PID 1 — systemd now ranks above it (see
-    // INIT_FALLBACKS) and never reads oxienv.toml, so without this the
-    // shim would silently never load. Skipped for foreign-disk (Phase 2)
-    // targets and rescue shells, where it isn't applicable.
+    // programs under /overlayer/syshub need sys_resolver from their first instruction
     if init_rel.starts_with("/overlayer/syshub/")
         && init_rel != "/overlayer/syshub/bin/bash"
     {
         if Path::new("/overlayer/syshub/lib/libsys_resolver.so").exists() {
-            // SAFETY: single-threaded at this point in boot, no concurrent
-            // env access possible.
+            // SAFETY: still single-threaded, nothing else reads the environment
             unsafe {
                 std::env::set_var(
                     "LD_PRELOAD",
@@ -327,8 +200,7 @@ pub fn pivot_to_root(target: &BootTarget) -> Result<(), String> {
     unreachable!("execv returned — kernel bug");
 }
 
-/// Return a `BootTarget` that boots to rescue shell (`bash` — Zainium has no `/bin/sh`).
-/// Used when `rd.rescue` or `single` is present on the cmdline.
+/// Boot target for rd.rescue and single: a bash shell.
 pub fn rescue_boot_target() -> BootTarget {
     let mount_point = MOUNT_TARGETS
         .iter()

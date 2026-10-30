@@ -1,30 +1,4 @@
-//! Root filesystem detection and mounting module
-//!
-//! Responsibilities:
-//! 1. Parse root device from kernel cmdline
-//! 2. Wait for device to appear in /dev (with retries)
-//! 3. Handle loop mount if loop= parameter provided (via raw ioctls — no losetup binary)
-//! 4. Mount the root filesystem to /mnt/root
-//! 5. Handle LABEL=, UUID=, and ISO/squashfs loop mounts
-//!
-//! # Loop Device Strategy
-//!
-//! The old implementation called `Command::new("losetup")` which fails in initramfs
-//! because the losetup binary lives on the root filesystem (not yet mounted).
-//!
-//! The new implementation uses raw Linux ioctls directly:
-//!
-//! | Step | Call | Purpose |
-//! |------|------|---------|
-//! | 1 | `open("/dev/loop-control", O_RDWR)` | Open loop controller |
-//! | 2 | `ioctl(LOOP_CTL_GET_FREE)` | Get next free loop device number N |
-//! | 3 | `open("/dev/loopN", O_RDWR)` | Open that loop device |
-//! | 4 | `open(image, O_RDONLY)` | Open squashfs image file |
-//! | 5 | `ioctl(LOOP_SET_FD, image_fd)` | Attach image to loop device |
-//! | 6 | `ioctl(LOOP_SET_STATUS64, &info)` | Set backing filename (cosmetic) |
-//! | 7 | return `"/dev/loopN"` | Used for mount(2) call |
-//!
-//! This is exactly what `losetup -f --show <file>` does internally.
+//! Finds the root device (root=, LABEL=, UUID=, loop=) and mounts it, with no external tools.
 
 use crate::cmdline::Cmdline;
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
@@ -35,22 +9,16 @@ use std::os::unix::fs::symlink;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 
-// Device path prefix constants
-
 const LABEL_PREFIX: &str = "/dev/disk/by-label/";
 const UUID_PREFIX: &str = "/dev/disk/by-uuid/";
 const LIVE_SEARCH_MOUNT: &str = "/run/live/search";
 const LIVE_MEDIUM_MOUNT: &str = "/run/live/medium";
 const CALAMARES_BRIDGE: &str = "/cdrom";
-/// Root image candidates inside the live medium, checked in priority order.
-/// EROFS (`zairoot.img`) is the default eclipse-iso-builder output; the
-/// `.squashfs` name is still checked for media built with `--format squashfs`.
+/// Root images on the live medium, in order: EROFS first, squashfs for older media.
 const ZAINIUM_ROOT_IMAGE_CANDIDATES: &[&str] = &["zaisys/zairoot.img", "zaisys/zairoot.squashfs"];
 const SEARCH_FILESYSTEMS: &[&str] = &[
     "iso9660", "udf", "erofs", "squashfs", "ext4", "xfs", "btrfs", "f2fs", "vfat",
 ];
-
-// Loop device ioctl constants (from <linux/loop.h>)
 
 /// Request next free loop device number
 const LOOP_CTL_GET_FREE: libc::c_int = 0x4C82u32 as libc::c_int;
@@ -61,10 +29,7 @@ const LOOP_SET_STATUS64: libc::c_int = 0x4C04u32 as libc::c_int;
 /// Set the loop device's logical block size (default is 512, EROFS needs 4096)
 const LOOP_SET_BLOCK_SIZE: libc::c_int = 0x4C09u32 as libc::c_int;
 
-/// `struct loop_info64` from `<linux/loop.h>`
-///
-/// Used with `LOOP_SET_STATUS64` to record the backing filename in
-/// `/proc/mounts` and `losetup -l` output.
+/// struct loop_info64 from <linux/loop.h>, for LOOP_SET_STATUS64.
 #[repr(C)]
 struct LoopInfo64 {
     lo_device: u64,
@@ -81,8 +46,6 @@ struct LoopInfo64 {
     lo_encrypt_key: [u8; 32],
     lo_init: [u64; 2],
 }
-
-// RAII fd guard
 
 /// Closes a raw file descriptor on drop — prevents fd leaks on error paths.
 struct FdGuard(RawFd);
@@ -104,8 +67,6 @@ impl FdGuard {
         fd
     }
 }
-
-// Device existence check
 
 /// O(1) non-blocking device existence check.
 #[inline]
@@ -138,10 +99,7 @@ fn list_available_devices() {
     }
 }
 
-/// Enumerate block devices from `/sys/class/block`.
-///
-/// This covers modern device families that do not fit the old `sd*` model,
-/// including NVMe, MMC/SD, virtio, and CD/DVD devices.
+/// Every block device in /sys/class/block (NVMe, MMC, virtio, optical drives too).
 fn list_all_block_devices() -> Vec<PathBuf> {
     let mut devices = Vec::new();
 
@@ -222,10 +180,7 @@ fn bridge_calamares_source() -> Result<(), String> {
     symlink(LIVE_MEDIUM_MOUNT, bridge).map_err(|e| format!("create /cdrom symlink failed: {}", e))
 }
 
-/// Search all visible block devices for the Zainium live medium.
-///
-/// The found device is mounted read-only at `/run/live/medium` and exposed
-/// through `/cdrom` so Calamares can resolve `/cdrom/zaisys/zairoot.squashfs`.
+/// Finds the live medium, mounts it read-only at /run/live/medium and links it at /cdrom.
 pub fn prepare_live_medium_bridge() -> Result<Option<PathBuf>, String> {
     let devices = list_all_block_devices();
     if devices.is_empty() {
@@ -283,20 +238,7 @@ pub fn prepare_live_medium_bridge() -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-/// Loop-mount an already-discovered live medium image straight onto
-/// `mount_target`, bypassing `find_root`/`mount_root_at` entirely.
-///
-/// `image_path` is the absolute path `prepare_live_medium_bridge` already
-/// returned (e.g. `/run/live/medium/zaisys/zairoot.img`) — the medium is
-/// already mounted read-only at `LIVE_MEDIUM_MOUNT`, so there's nothing
-/// left to detect: no `root=` device to resolve, no LUKS/NFS/RAID
-/// classification to do. `mount_root_impl`'s own loop+image strategy only
-/// triggers for device paths that look like an optical drive
-/// (`/dev/sr*`, `/dev/cdrom`, `/dev/dvd`) — real Zainium live media is
-/// just as often a USB stick (`/dev/sdX`), which that classification
-/// would instead treat as a plain partition and never loop-mount at all.
-/// This path sidesteps that mismatch by not going through device
-/// classification in the first place.
+/// Loop-mounts the live root image found by prepare_live_medium_bridge on `mount_target`.
 pub fn mount_live_root(
     image_path: &std::path::Path,
     cmdline: &Cmdline,
@@ -311,10 +253,7 @@ pub fn mount_live_root(
 
     let loop_device = setup_loop_ioctl(image_str)?;
 
-    // Same fstype-guessing convention as mount_root_impl's ISO_CDROM
-    // branch: explicit loopfstype= always wins, otherwise guess from the
-    // image's own extension (eclipse-iso-builder emits EROFS by default,
-    // SquashFS only under --format squashfs).
+    // loopfstype= wins, otherwise the image's extension tells EROFS from squashfs
     let mount_fstype = cmdline.loop_fstype.as_deref().unwrap_or_else(|| {
         let guess = if image_str.ends_with(".squashfs") {
             "squashfs"
@@ -345,14 +284,7 @@ pub fn mount_live_root(
     Ok(())
 }
 
-// find_root
-
-/// Detect and return root device path from kernel cmdline.
-///
-/// Retries are configurable via kernel cmdline:
-/// - `rootwait`   → infinite wait (for slow USB/NVMe enumeration)
-/// - `rootwait=N` → N retries × 50ms
-/// - (absent)     → default 100 retries × 50ms = 5 seconds
+/// Waits for the root device: rootwait waits forever, rootwait=N tries N times, default 5 seconds.
 #[inline]
 pub fn find_root(cmdline: &Cmdline) -> Result<String, String> {
     let root_spec = cmdline.root.as_ref().ok_or("No root= parameter")?;
@@ -376,12 +308,7 @@ pub fn find_root(cmdline: &Cmdline) -> Result<String, String> {
         root_spec.clone()
     };
 
-    // Dynamic root wait — configurable via kernel cmdline rootwait=N
-    // rootwait=100 → 100 retries × 50ms = 5 seconds
-    // rootwait (bare, no value) → infinite wait (0 = infinite)
-    // No rootwait → default 100 retries (5 seconds): udev settle returns as soon as the
-    // kernel is quiet, so a slow disk controller is waited for here; a disk that is
-    // already there costs nothing
+    // rootwait=N retries every 50 ms; bare rootwait waits forever; default 100 tries
     const RETRY_MS: u64 = 50;
     let max_retries: u32 = match cmdline.rootwait {
         Some(0) => u32::MAX, // rootwait (bare) — wait indefinitely
@@ -434,14 +361,7 @@ pub fn find_root(cmdline: &Cmdline) -> Result<String, String> {
     ))
 }
 
-// Loop device setup via raw ioctls
-
-/// Attach `image_path` to a free loop device using raw Linux ioctls.
-///
-/// This replaces `Command::new("losetup")` — no external binary required.
-/// All calls are libc functions available in any musl static binary.
-///
-/// Returns the loop device path (e.g. `"/dev/loop0"`).
+/// Attaches `image_path` to a free loop device with ioctls; returns its path.
 fn setup_loop_ioctl(image_path: &str) -> Result<String, String> {
     // Step 1: Open /dev/loop-control
     let ctrl_path = CString::new("/dev/loop-control").map_err(|_| "invalid loop-control path")?;
@@ -500,9 +420,7 @@ fn setup_loop_ioctl(image_path: &str) -> Result<String, String> {
     attach_loop_fd(loop_fd, image_path, &loop_dev_path, loop_num as u32)
 }
 
-/// Attach `image_path` to the already-open loop device fd.
-///
-/// Takes ownership of `loop_fd` via FdGuard (closed on error or after attach).
+/// Attaches `image_path` to the open loop device `loop_fd`, which is closed afterwards.
 fn attach_loop_fd(
     loop_fd: RawFd,
     image_path: &str,
@@ -534,8 +452,7 @@ fn attach_loop_fd(
     }
     drop(img_guard); // kernel has the reference now, close our fd
 
-    // Loop devices default to 512-byte sectors; EROFS needs 4096. Without
-    // this, mount(2) fails with EINVAL even though everything else is fine.
+    // EROFS needs 4096-byte sectors; loop devices default to 512 and mount fails with EINVAL
     let _ = unsafe { libc::ioctl(loop_fd, LOOP_SET_BLOCK_SIZE as _, 4096u64) };
 
     // Step 6: LOOP_SET_STATUS64 — record backing filename (cosmetic, ignore failure)
@@ -552,14 +469,7 @@ fn attach_loop_fd(
     Ok(loop_dev_path.to_string())
 }
 
-// setup_loop_device
-
-/// Mount ISO/CDROM and attach squashfs image to a loop device.
-///
-/// 1. Mount `root_device` (ISO9660) to `iso_mount_path`
-/// 2. Find `loop_image_path` inside the ISO
-/// 3. Attach it to a free loop device via `setup_loop_ioctl()`
-/// 4. Return the loop device path for `mount_root()` to mount
+/// Mounts the ISO, attaches the root image inside it to a loop device and returns the device.
 fn setup_loop_device(
     root_device: &str,
     iso_mount_path: &str,
@@ -607,8 +517,6 @@ fn setup_loop_device(
     Ok(loop_device)
 }
 
-// mount_root
-
 fn is_luks_device(device: &str) -> Result<bool, String> {
     // Read first 6 bytes to check LUKS magic ("LUKS\xba\xbe")
     let mut file =
@@ -620,12 +528,7 @@ fn is_luks_device(device: &str) -> Result<bool, String> {
     Ok(magic == [b'L', b'U', b'K', b'S', 0xba, 0xbe])
 }
 
-/// Open a LUKS-encrypted device and map it to /dev/mapper/<name>.
-///
-/// Three-tier passphrase strategy:
-///   0. TPM2 unseal — silent, no user interaction (fails → next)
-///   1. Keyfile from cmdline luks_keyfile= (fails → next)
-///   2. Interactive passphrase on /dev/console (echo disabled)
+/// Opens LUKS as /dev/mapper/<name>: TPM2 first, then the keyfile, then a passphrase prompt.
 fn open_luks_device(device: &str, name: &str, keyfile: Option<&str>) -> Result<String, String> {
     klog!("\n╔══════════════════════════════════════╗");
     klog!("║   LUKS Encrypted Device Detected     ║");
@@ -668,10 +571,7 @@ fn open_luks_device(device: &str, name: &str, keyfile: Option<&str>) -> Result<S
     open_luks_with_passphrase(device, name, &passphrase)
 }
 
-/// Read keyfile from a spec like "/dev/sdb1:/luks.key" or just "/path/to/file".
-///
-/// Format: `<block_device>:<path_inside>` → mount block_device, read file.
-/// Format: `<path>` → read directly (file already accessible).
+/// Reads a keyfile given as <device>:<path> (mounting the device) or as a plain path.
 fn read_keyfile(spec: &str) -> Result<Vec<u8>, String> {
     use std::io::Read;
 
@@ -709,9 +609,7 @@ fn read_keyfile(spec: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Prompt for LUKS passphrase on /dev/console with echo disabled.
-///
-/// Uses `tcsetattr` to turn off ECHO, reads a line, restores terminal state.
+/// Asks for the LUKS passphrase on /dev/console without echo.
 fn prompt_luks_passphrase(name: &str) -> Result<Vec<u8>, String> {
     use std::io::{Read, Write};
 
@@ -758,10 +656,7 @@ fn prompt_luks_passphrase(name: &str) -> Result<Vec<u8>, String> {
     Ok(passphrase)
 }
 
-/// Call `cryptsetup luksOpen` with the passphrase provided on stdin.
-///
-/// We use `cryptsetup` if present (most reliable, supports all LUKS versions).
-/// The passphrase is piped via stdin so it never appears in /proc/cmdline or ps.
+/// Runs cryptsetup luksOpen with the passphrase on stdin, never on the command line.
 fn open_luks_with_passphrase(
     device: &str,
     name: &str,
@@ -812,16 +707,7 @@ fn open_luks_with_passphrase(
     }
 }
 
-/// Mount root filesystem to `/mnt/root`.
-///
-/// Detects device type and applies correct mount strategy:
-/// - ISO/CDROM + loop=: ISO9660 → loop ioctl → squashfs mount
-/// - Ramdisk: explicit filesystem candidates with fallback
-/// - Partition (HDD/SSD/NVMe): explicit `rootfstype=` with fallback candidates
-/// - Unknown: explicit `rootfstype=` first, then fallback candidates
-///
-/// Flexible variant that mounts to `mount_target` (e.g. `/zairoot`, `/mnt/root`, `/sysroot`)
-/// instead of the hardcoded `/mnt/root`. Called from main.rs with the discovered mount point.
+/// Mounts the root at `mount_target`: ISO and loop images, ramdisks and partitions.
 pub fn mount_root_at(device: &str, cmdline: &Cmdline, mount_target: &str) -> Result<(), String> {
     mount_root_impl(device, cmdline, mount_target)
 }
@@ -904,9 +790,7 @@ fn mount_root_impl(device: &str, cmdline: &Cmdline, mount_target: &str) -> Resul
                 let loop_device =
                     setup_loop_device(device, "/mnt/iso-root", loop_image, loop_fstype.as_deref())?;
 
-                // No loopfstype= supplied — guess from the image filename, since
-                // eclipse-iso-builder now emits EROFS (.img) by default and
-                // SquashFS (.squashfs) only when built with --format squashfs.
+                // no loopfstype=: guess from the image's extension
                 let mount_fstype = loop_fstype.as_deref().unwrap_or_else(|| {
                     let guess = if loop_image.ends_with(".squashfs") {
                         "squashfs"

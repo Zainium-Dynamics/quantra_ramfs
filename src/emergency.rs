@@ -1,28 +1,11 @@
 use std::fs;
-/// Emergency shell module - fallback when boot fails
-///
-/// Provides interactive recovery shell with built-in commands that require
-/// NO external binaries — works even in a minimal initramfs with no /bin/sh.
-///
-/// Built-in commands (always available, zero external dependencies):
-///   reboot   — calls libc::reboot(RB_AUTOBOOT) directly
-///   poweroff — calls libc::reboot(RB_POWER_OFF) directly
-///   halt     — alias for poweroff
-///   ls [dir] — reads directory via fs::read_dir
-///   cat FILE — reads file via fs::read_to_string
-///   mount    — displays /proc/mounts
-///
-/// External commands: attempted via fish, bash, zsh, or sh if present.
+/// Emergency shell when boot fails, with built-in commands that need no external binaries.
 use std::io::{self, Write};
 use std::process::Command;
 
-/// Enter emergency shell with diagnostics.
-///
-/// # Never Returns
+/// Prints why the boot failed and opens the emergency shell; never returns.
 pub fn shell(reason: &str) -> ! {
-    // main.rs may have pointed fd 2 at the kernel ring buffer once
-    // Plymouth took the display -- an emergency prompt is worthless if
-    // nobody can see it, so put the console back before printing anything.
+    // Plymouth may have taken the console; give it back before printing.
     crate::restore_console_stderr();
 
     eprintln!("\n\x1b[1;31m╔══════════════════════════════════════╗");
@@ -131,18 +114,7 @@ pub fn shell(reason: &str) -> ! {
 
             // External command via shell
             _ => {
-                // `emergency::shell()` is called from many points across boot
-                // (see main.rs) — some very early (before OverlayFS is even
-                // mounted, e.g. "early mount failed"), some very late
-                // (pre-pivot, switch_root, or even after pivot_root already
-                // succeeded). A shell living under `/overlayer/syshub/bin/`
-                // only exists in those late cases (post-pivot, `/` really is
-                // the merged root); in the pre-pivot cases the same binaries
-                // instead live under `/new_root/overlayer/syshub/bin/`
-                // (OverlayFS merge target — there is no flattened `/bin` at
-                // either root, see switch.rs). Checking both, in that order,
-                // means this works regardless of which phase actually failed
-                // rather than assuming one. Zainium has no `/bin/sh`.
+                // before pivot the shells live under the disk's syshub, after it under /overlayer/syshub
                 let shell_names = ["fish", "bash", "zsh"];
                 let mut candidates: Vec<String> = shell_names
                     .iter()

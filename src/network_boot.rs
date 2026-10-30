@@ -1,40 +1,12 @@
 extern crate libc;
 
-/// Network boot support — DHCP, iSCSI, NBD, HTTP rootfs, IPv6
-///
-/// Provides network-based root filesystem acquisition for:
-/// - NFS root (already in rootfs.rs — DHCP makes it fully functional)
-/// - iSCSI root (`iscsistart` + mount block device)
-/// - NBD (Network Block Device) root
-/// - HTTP boot (download squashfs/ext4 image over HTTP)
-///
-/// # DHCP client
-///
-/// Pure Rust DHCP client (DHCPv4 RFC 2131 + DHCPv6 RFC 8415).
-/// No `dhclient`, `udhcpc`, or `busybox` binary needed.
-///
-/// # Cmdline parameters
-///
-/// | Parameter | Description |
-/// |-----------|-------------|
-/// | `ip=dhcp` / `ip=<iface>:dhcp` | Enable DHCP on interface |
-/// | `ip=<ip>::<gw>:<mask>:<host>:<iface>:none` | Static IP |
-/// | `ip=<ip>:<peer>:<gw>:<mask>:<host>:<iface>:<proto>` | Full spec |
-/// | `rd.iscsi.initiator=` | iSCSI initiator IQN |
-/// | `rd.iscsi.target.name=` | iSCSI target IQN |
-/// | `rd.iscsi.target.ip=` | iSCSI target IP |
-/// | `rd.iscsi.target.port=` | iSCSI port (default 3260) |
-/// | `nbd=<host>:<port>` | NBD server |
-/// | `rd.http.url=` | HTTP URL to download rootfs image |
-/// | `ipv6=dhcpv6` | Enable DHCPv6 |
+/// Network root: DHCP (v4 and v6), iSCSI, NBD and HTTP images, with no external tools.
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
-
-// DHCPv4 client
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
@@ -119,9 +91,7 @@ impl DhcpLease {
     }
 }
 
-/// Perform DHCP discovery on `iface` and return the lease.
-///
-/// Implements DISCOVER → OFFER → REQUEST → ACK (4-way handshake).
+/// DHCP DISCOVER, OFFER, REQUEST, ACK on `iface`; returns the lease.
 pub fn dhcp_acquire(iface: &str, timeout: Duration) -> Result<DhcpLease, String> {
     klog!("  dhcp: DISCOVER on {}", iface);
 
@@ -418,8 +388,6 @@ fn run_ip(args: &[&str]) -> Result<(), String> {
     }
 }
 
-// Network interface discovery
-
 /// Find all available network interfaces (excluding lo).
 pub fn list_interfaces() -> Vec<String> {
     fs::read_dir("/sys/class/net")
@@ -450,8 +418,6 @@ pub fn dhcp_any_interface(timeout_per_iface: Duration) -> Option<DhcpLease> {
     }
     None
 }
-
-// iSCSI root
 
 /// iSCSI target configuration.
 #[derive(Debug)]
@@ -547,8 +513,6 @@ fn find_iscsi_device() -> Option<String> {
     None
 }
 
-// NBD (Network Block Device)
-
 /// Connect to an NBD server and return the /dev/nbdN device path.
 pub fn connect_nbd(host: &str, port: u16, name: Option<&str>) -> Result<String, String> {
     let nbd_client = &[
@@ -604,12 +568,7 @@ fn find_free_nbd() -> Option<String> {
     None
 }
 
-// HTTP boot
-
-/// Download a rootfs image over HTTP and save to a temp file.
-///
-/// Uses a minimal pure-Rust HTTP/1.1 GET client.
-/// No curl/wget needed.
+/// Downloads a root image over HTTP/1.1 into a temp file.
 #[allow(dead_code)]
 pub fn http_fetch_rootfs(url: &str, dest_path: &str) -> Result<u64, String> {
     klog!("  http-boot: downloading {} → {}", url, dest_path);
@@ -726,12 +685,7 @@ fn parse_http_url(url: &str) -> Result<(String, u16, String), String> {
     Ok((host.to_string(), port, path.to_string()))
 }
 
-// IPv6 SLAAC
-
-/// Enable IPv6 SLAAC (Stateless Address Autoconfiguration) on an interface.
-///
-/// Writes to sysctl to enable accept_ra and autoconf, then waits for
-/// the kernel to assign an IPv6 address from Router Advertisement.
+/// Turns on IPv6 SLAAC on `iface` and waits for an address.
 pub fn enable_ipv6_slaac(iface: &str) -> Result<String, String> {
     klog!("  ipv6: enabling SLAAC on {}", iface);
 

@@ -96,9 +96,7 @@ fn main() -> ! {
         ok(format!("udev: {udev_pre_count} device(s) detected"));
     }
 
-    // Live medium probe, only when asked for: the live ISO's entry passes loop=, an installed
-    // system passes root= and must never be swapped for a live USB that is still plugged in.
-    // Retry with fresh udev settles, USB storage is slow to enumerate.
+    // only the live ISO passes loop=: an installed system must never boot a live USB left plugged in
     let raw_cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let has = |key: &str| raw_cmdline.split_whitespace().any(|t| t.starts_with(key));
     let wants_live = has("loop=") || !has("root=");
@@ -108,8 +106,7 @@ fn main() -> ! {
         Ok(None)
     };
     if wants_live && matches!(live_result, Ok(None)) {
-        // settle now returns as soon as udev is quiet, so bound the search by time
-        // (USB sticks can take a few seconds to show up), not by a retry count
+        // USB sticks can take seconds to appear: wait by time, not by retries
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(200));
@@ -162,8 +159,7 @@ fn main() -> ! {
         emergency::shell("rd.break=pre-mount");
     }
 
-    // Extra udev settle if udev is enabled — wait for slow devices. A live medium that
-    // was already found needs no more waiting.
+    // wait once more for slow devices unless the live medium is already found
     if cmdline.udev_enabled && live_image.is_none() {
         let rootwait_ms = match cmdline.rootwait {
             Some(0) => 10_000, // bare rootwait — give udev 10s
@@ -331,9 +327,7 @@ fn main() -> ! {
     }
     ok(format!("Mounted root filesystem → {zairoot}"));
 
-    // The display driver comes from the root disk and the splash starts on it, so there is
-    // no hand-over from the firmware framebuffer later in the boot (and a LUKS passphrase
-    // prompt before this point stays on the console).
+    // the splash starts on the disk's display driver, so there is no framebuffer hand-over later
     let displays = gpu::load_from_disk(zairoot);
     if displays > 0 {
         ok(format!("Display driver loaded from the root disk ({displays} device(s))"));
@@ -411,8 +405,6 @@ fn main() -> ! {
 
     emergency::shell("execv returned unexpectedly");
 }
-
-// dm-verity setup helper
 
 /// Parse verity config from cmdline, set up dm-verity, return `/dev/mapper/zainium-verity`.
 fn setup_verity_device(cmdline: &cmdline::Cmdline, root_device: &str) -> Result<String, String> {

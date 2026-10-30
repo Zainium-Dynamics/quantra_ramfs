@@ -1,44 +1,12 @@
-/// Minimal uevent processor — kernel netlink device announcements
-///
-/// # Problem
-///
-/// The old initramfs only created `/dev/loop-control` and `/dev/loop0-7` via
-/// `mknod`. This means NVMe partitions, USB drives, MMC cards, and any device
-/// that appears after the kernel starts sending uevents are NOT in `/dev`.
-///
-/// # Solution
-///
-/// This module opens a `NETLINK_KOBJECT_UEVENT` socket and processes kernel
-/// uevent messages. For each `ACTION=add` event with `SUBSYSTEM=block`, it
-/// creates the corresponding `/dev` node using `mknod(2)` with the correct
-/// major/minor numbers from the event.
-///
-/// This replaces `udevd` for the initramfs use case. We don't need rules
-/// evaluation, symlinks in `/dev/disk/by-*`, or renaming — just the nodes.
-///
-/// # Uevent message format (from kernel)
-///
-/// One recvfrom, null-terminated `KEY=VALUE` fields: an `ACTION=add`
-/// line, then `DEVPATH=`, `SUBSYSTEM=`, `DEVNAME=`, `DEVTYPE=`, `MAJOR=`,
-/// `MINOR=`, `SEQNUM=`.
-///
-/// # Usage
-///
-/// `udev::settle(Duration::from_secs(3))` processes uevents for up to N
-/// seconds; `udev::wait_for_device(path, timeout)` waits for one specific
-/// device to appear.
+/// Creates /dev nodes from the kernel's uevents, so disks that appear late are found.
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::io::RawFd;
 use std::time::{Duration, Instant};
 
-// Netlink constants
-
 const AF_NETLINK: libc::c_int = 16;
 const SOCK_RAW: libc::c_int = 3;
 const NETLINK_KOBJECT_UEVENT: libc::c_int = 15;
-
-// Parsed uevent
 
 #[derive(Debug, Default)]
 struct Uevent {
@@ -50,13 +18,7 @@ struct Uevent {
     minor: u32,
 }
 
-// Public API
-
-/// Process kernel uevents for `duration`, creating `/dev` nodes for all
-/// block devices announced as `ACTION=add`.
-///
-/// Returns the number of device nodes created.
-/// Non-fatal: if the netlink socket cannot be opened, returns 0 silently.
+/// Handles uevents for up to `duration` and creates block device nodes; returns how many.
 pub fn settle(duration: Duration) -> usize {
     let fd = match open_netlink() {
         Ok(f) => f,
@@ -80,8 +42,7 @@ pub fn settle(duration: Duration) -> usize {
     let sock_fd = fd;
     set_nonblocking(sock_fd);
 
-    // `duration` is an upper bound: once the kernel has been quiet for QUIET the
-    // devices present at boot are all in, and waiting out the rest only delays the splash
+    // stop once the kernel has been quiet this long: the boot devices are all in
     const QUIET: Duration = Duration::from_millis(150);
     let mut last_event = Instant::now();
     let mut buf = vec![0u8; 8192];
@@ -110,9 +71,7 @@ pub fn settle(duration: Duration) -> usize {
     created
 }
 
-/// Block until `device_path` exists in `/dev`, processing uevents meanwhile.
-///
-/// Returns `true` if the device appeared within `timeout`, `false` otherwise.
+/// Waits up to `timeout` for `device_path` to appear in /dev.
 #[allow(dead_code)]
 pub fn wait_for_device(device_path: &str, timeout: Duration) -> bool {
     if std::path::Path::new(device_path).exists() {
@@ -157,10 +116,7 @@ pub fn wait_for_device(device_path: &str, timeout: Duration) -> bool {
     std::path::Path::new(device_path).exists()
 }
 
-/// Create `/dev/disk/by-uuid/` and `/dev/disk/by-label/` symlinks by scanning
-/// sysfs and reading filesystem superblocks. Lightweight blkid replacement.
-///
-/// Returns count of symlinks created.
+/// Creates /dev/disk/by-uuid and by-label links from the superblocks; returns how many.
 pub fn create_disk_symlinks() -> usize {
     let mut count = 0;
 
@@ -254,8 +210,6 @@ fn probe_fs_ids(dev: &str) -> Option<(Option<String>, Option<String>)> {
     None
 }
 
-// Netlink socket
-
 fn open_netlink() -> Result<RawFd, String> {
     let fd = unsafe { libc::socket(AF_NETLINK, SOCK_RAW, NETLINK_KOBJECT_UEVENT) };
     if fd < 0 {
@@ -295,8 +249,6 @@ fn set_nonblocking(fd: RawFd) {
     }
 }
 
-// Uevent parsing
-
 fn parse_uevent(buf: &[u8]) -> Option<Uevent> {
     // Skip the first line (the header "action@devpath\0")
     let first_null = buf.iter().position(|&b| b == 0)?;
@@ -334,8 +286,6 @@ fn parse_uevent(buf: &[u8]) -> Option<Uevent> {
     Some(ev)
 }
 
-// Device node creation
-
 fn create_dev_node(ev: &Uevent) -> bool {
     // devname may contain subdirs (e.g. "block/sda1" on some kernels)
     let basename = ev.devname.split('/').next_back().unwrap_or(&ev.devname);
@@ -363,8 +313,7 @@ fn create_dev_node(ev: &Uevent) -> bool {
     }
 }
 
-/// Trigger uevents for all existing block devices by reading sysfs.
-/// This handles devices that appeared before our netlink socket was opened.
+/// Replays uevents for block devices that appeared before the socket was opened.
 fn trigger_existing_block_devices() -> usize {
     let mut created = 0;
 

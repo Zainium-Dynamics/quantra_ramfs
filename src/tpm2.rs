@@ -1,49 +1,7 @@
-/// TPM2 key unsealing — LUKS key from PCR policy
-///
-/// # Overview
-///
-/// This module communicates with the TPM2 device directly via the kernel's
-/// `/dev/tpm0` or `/dev/tpmrm0` (resource manager) character device using
-/// the TPM2 wire protocol (TPM2 Part 3 Commands specification).
-///
-/// # Use case
-///
-/// A LUKS encryption key is sealed to the TPM2 at install time, bound to a
-/// PCR policy. At boot, if PCR values match the policy (meaning no tampering
-/// has occurred), the TPM2 releases the key → LUKS is unlocked without user
-/// passphrase input.
-///
-/// # PCR policy
-///
-/// PCRs used by default:
-/// - PCR 0 — UEFI firmware code
-/// - PCR 1 — UEFI firmware configuration
-/// - PCR 7 — Secure Boot state
-/// - PCR 8 — Zainium measured boot phases (extended by measured_boot.rs)
-///
-/// # TPM2 commands used
-///
-/// `TPM2_CC_StartAuthSession` creates the HMAC/policy session,
-/// `TPM2_CC_PolicyPCR` binds it to the current PCR values, `TPM2_CC_Unseal`
-/// unseals the blob using that policy session, and `TPM2_CC_FlushContext`
-/// cleans up the session handle afterward.
-///
-/// # Blob storage
-///
-/// The sealed blob is stored at `/overlayer/syshub/etc/zainium/tpm2-luks-blob`
-/// on the syshub (read-only). This file contains the serialized TPM2B_PUBLIC +
-/// TPM2B_PRIVATE written by the enrollment tool at install time.
-///
-/// # Fallback
-///
-/// If TPM2 unsealing fails for any reason (PCR mismatch, device absent,
-/// malformed blob), the module returns `Err` and the caller falls back to
-/// interactive passphrase prompt.
+/// Unseals the LUKS key from the TPM2 under a PCR policy, talking to /dev/tpmrm0 directly.
 use std::fs;
 use std::io;
 use std::os::unix::io::RawFd;
-
-// TPM2 constants
 
 const TPM2_ST_NO_SESSIONS: u16 = 0x8001;
 const TPM2_ST_SESSIONS: u16 = 0x8002;
@@ -71,8 +29,6 @@ const BLOB_PATH: &str = "/overlayer/syshub/etc/zainium/tpm2-luks-blob";
 /// Parent handle persistence handle (written at enroll time)
 const PARENT_HANDLE_PATH: &str = "/overlayer/syshub/etc/zainium/tpm2-parent-handle";
 
-// RAII fd guard
-
 struct FdGuard(RawFd);
 impl Drop for FdGuard {
     fn drop(&mut self) {
@@ -84,16 +40,7 @@ impl Drop for FdGuard {
     }
 }
 
-// Public API
-
-/// Attempt to unseal the LUKS key from TPM2.
-///
-/// Returns the raw key bytes on success. The caller should:
-/// 1. Pipe these bytes to `cryptsetup luksOpen --key-file=-`
-/// 2. Zero the Vec immediately after use
-///
-/// Returns `Err` on any failure (device absent, PCR mismatch, blob corrupt).
-/// Callers MUST fall back to interactive passphrase on `Err`.
+/// Unseals the LUKS key; on any Err the caller falls back to the passphrase prompt.
 pub fn unseal_luks_key() -> Result<Vec<u8>, String> {
     klog!("  TPM2: unsealing LUKS key...");
 
@@ -149,8 +96,6 @@ pub fn tpm2_blob_exists() -> bool {
     std::path::Path::new(BLOB_PATH).exists()
 }
 
-// TPM2 device I/O
-
 fn open_tpm_device() -> Result<RawFd, String> {
     // Prefer resource manager — handles concurrent access and session cleanup
     for path in &["/dev/tpmrm0", "/dev/tpm0"] {
@@ -167,10 +112,7 @@ fn open_tpm_device() -> Result<RawFd, String> {
     ))
 }
 
-/// Send a TPM2 command and receive the response.
-///
-/// Writes `cmd` to the TPM fd, reads back up to 4096 bytes response.
-/// Validates response tag and checks RC == TPM2_RC_SUCCESS.
+/// Sends a TPM2 command and returns the response when its code is TPM2_RC_SUCCESS.
 fn tpm2_send(fd: RawFd, cmd: &[u8]) -> Result<Vec<u8>, String> {
     // Write command
     let mut written = 0;
@@ -209,12 +151,8 @@ fn tpm2_send(fd: RawFd, cmd: &[u8]) -> Result<Vec<u8>, String> {
     Ok(resp)
 }
 
-// TPM2 command builders
-
 fn tpm2_load(fd: RawFd, parent: u32, public: &[u8], private: &[u8]) -> Result<u32, String> {
-    // TPM2_CC_LOAD:
-    // Header: tag(2) size(4) cc(4)
-    // parentHandle(4) + authorization(sessions) + inPrivate(TPM2B) + inPublic(TPM2B)
+    // TPM2_CC_Load: header, parent handle, sessions, inPrivate, inPublic
     let mut cmd = Vec::with_capacity(256);
 
     // Session area: password authorization for parent (empty auth)
@@ -333,8 +271,6 @@ fn tpm2_flush_context(fd: RawFd, handle: u32) -> Result<(), String> {
     Ok(())
 }
 
-// Helper builders
-
 fn build_pw_auth_area() -> Vec<u8> {
     // TPMS_AUTH_COMMAND: handle=TPM2_RS_PW, nonce=empty, attrs=0, hmac=empty
     let mut v = Vec::with_capacity(9);
@@ -377,12 +313,7 @@ fn push_u32(v: &mut Vec<u8>, val: u32) {
     v.extend_from_slice(&val.to_be_bytes());
 }
 
-// Blob parsing
-
-/// Parse the enrollment blob into (public_area, private_area).
-///
-/// Blob format: u16 public_size, public_data (TPM2B_PUBLIC), u16
-/// private_size, private_data (TPM2B_PRIVATE) — all big-endian.
+/// Splits the enrollment blob into its public and private areas (big-endian sizes).
 fn parse_blob(blob: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
     if blob.len() < 4 {
         return Err("TPM2 blob too short".to_string());

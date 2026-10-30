@@ -1,101 +1,10 @@
-/// OverlayFS — Zainium "Immutable Merge"
-///
-/// # Purpose
-///
-/// After the physical disk is mounted at `/zairoot`, this module constructs
-/// the live root filesystem that PID 1 (systemd, or `quantra` as a fallback
-/// — see `switch.rs`'s `INIT_FALLBACKS`) will see by merging three layers
-/// via the Linux OverlayFS kernel driver.
-///
-/// # Architecture — "Option B" (no flattened FHS at root)
-///
-/// Unlike a traditional initramfs `switch_root`, Zainium does **not** flatten
-/// syshub's own top level (bin/, lib/, etc/, engine/, …) onto `/`. Packages
-/// (e.g. GCC) are built with `--prefix=/overlayer/syshub` — see
-/// `zex-env/src/paths.rs` — so that prefix must be a real, live path after
-/// pivot, not just before it on the physical disk.
-///
-/// `/new_root` (tmpfs, becomes `/` after `pivot_root`) holds
-/// `overlayer/{syshub,zaisys,zexlib}` (merge target + bind mounts),
-/// `home`/`root` (bind-mounted from `/zairoot`), `dev`/`proc`/`sys`/`run`
-/// (MS_MOVE'd in `switch.rs`), and `tmp` (mounted later by PID 1).
-///
-/// `/new_root/overlayer/syshub` is the merged view: lowerdir[0] =
-/// `/zairoot/overlayer/syshub` (immutable base), lowerdir[1] =
-/// `/zairoot/overlayer/zaisys` (kernel/early-boot), upperdir =
-/// `.../zexlib/union` (writable), workdir = `.../zexlib/work`.
-///
-/// There is deliberately **no** `/bin`, `/sbin`, `/usr`, `/lib`, `/etc` or
-/// `/var` at the root of `/new_root` — `zex-env/src/paths.rs::FORBIDDEN_FHS`
-/// enforces this same rule for the toolchain side. `ls /` after boot shows
-/// only `overlayer`, `home`, `root`, `dev`, `proc`, `sys`, `run`, `tmp`.
-///
-/// `ls /overlayer` shows all three siblings — `syshub`, `zaisys`, `zexlib` —
-/// matching the real on-disk layout. `zaisys` and `zexlib` are *also* bind
-/// mounted at their own paths (in addition to feeding the merge below), so
-/// they're never hidden — only their **content** gets linked into the
-/// unified `syshub` view via OverlayFS.
-///
-/// **No compatibility symlink for `/etc` (or anything else).** An earlier
-/// version of this module recreated `/etc -> /overlayer/syshub/etc` in
-/// `/new_root` on every boot; that has been deliberately removed. Every
-/// piece of Zainium-owned code (`quantra`, `quantra-logind`, …) references
-/// `/overlayer/syshub/etc/...`, `/overlayer/syshub/var/...` etc. by its full
-/// explicit path — there is no root-level shim of any kind. `/var` merges
-/// into the overlay the same way `/etc` does (COW into `zexlib/union`); it
-/// is **not** a third bind mount alongside `/home` and `/root`.
-///
-/// # OverlayFS Semantics
-///
-/// Reads fall through to lowerdir if not in upperdir. Adds/modifies
-/// (copy-on-write) go to upperdir (`zexlib/union`). Deletes leave a
-/// whiteout in upperdir; lowerdir is never touched.
-///
-/// The syshub (lowerdir[0]) is listed first → it takes priority over zaisys.
-/// This means any file present in both syshub and zaisys is served from syshub.
-///
-/// Note: because upperdir/workdir (`zexlib/union`, `zexlib/work`) cannot live
-/// inside the merge they contribute to, they stay physically under
-/// `/zairoot/overlayer/zexlib/...` — a package installed by `zex` therefore
-/// appears at `/overlayer/syshub/bin/foo` in the live view while physically
-/// landing at `/zairoot/overlayer/zexlib/union/bin/foo` on disk. This is
-/// expected OverlayFS behaviour, not a bug.
-///
-/// # /home Bind Mount
-///
-/// `/zairoot/home` is bind-mounted to `/new_root/home` separately.
-/// This ensures user data survives a full zexlib rollback (resetting upperdir)
-/// without being affected by the overlay layer mechanism.
-///
-/// # Rescue Mode
-///
-/// If the kernel cmdline contains `zainium.overlay=off`, `overlay_disabled_by_cmdline()`
-/// returns `true` and main.rs skips this module entirely, booting the physical
-/// /zairoot mount point directly (syshub read-only, no zexlib packages). In
-/// that case `new_root` becomes `/zairoot` itself, which already has
-/// `overlayer/syshub` as a real subdirectory — `switch.rs`'s init-fallback
-/// paths are prefixed with `/overlayer/syshub` precisely so this case keeps
-/// working without a separate code path.
+/// Joins the layers with OverlayFS into the view the system runs on (/overlayer/syshub).
 use nix::mount::{MsFlags, mount};
 use std::fs;
 
-/// Mount the Zainium OverlayFS at `/new_root/overlayer/syshub`.
-///
-/// Caller must have already mounted the physical disk partition at `zairoot`
-/// (e.g. `/zairoot`). After this function returns `Ok`, the process should
-/// search for and exec the init binary from `/new_root/overlayer/syshub/...`
-/// (see `switch.rs`, whose `INIT_FALLBACKS` already carry that prefix).
-///
-/// # Arguments
-/// * `zairoot` — Path where the physical disk is mounted (e.g. `"/zairoot"`)
-///
-/// # Returns
-/// The path of the tmpfs root (`"/new_root"`) on success — i.e. the
-/// mountpoint that will become `/` after `pivot_root`, **not** the overlay
-/// merge subdirectory itself.
+/// Mounts the overlay at /new_root/overlayer/syshub over the disk mounted at `zairoot`.
 pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
-    // OverlayFS lowerdir: colon-separated, leftmost = highest priority
-    // syshub (base OS) overrides zaisys (kernel/early-boot) when files collide.
+    // leftmost lower wins: syshub over zaisys
     let lower = format!("{z}/overlayer/syshub:{z}/overlayer/zaisys", z = zairoot);
     let root = "/new_root".to_string();
     let merged = format!("{}/overlayer/syshub", root);
@@ -108,13 +17,7 @@ pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
         ));
     }
 
-    // upperdir + workdir normally live physically under zairoot's own
-    // overlayer/zexlib (writable installed-disk case). On a live boot,
-    // zairoot itself is the read-only loop-mounted image, so that path
-    // can't be created — fall back to a tmpfs-backed zexlib instead
-    // (ephemeral, matches how any live distro handles this: writable for
-    // the session, gone on reboot). Only syshub/zaisys are meant to be
-    // read-only; zexlib is always meant to be writable.
+    // the live image is read-only, so its zexlib lives on a tmpfs for the session
     let phys_upper = format!("{}/overlayer/zexlib/union", zairoot);
     let phys_work = format!("{}/overlayer/zexlib/work", zairoot);
     let phys_zexlib = format!("{}/overlayer/zexlib", zairoot);
@@ -135,25 +38,14 @@ pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
         }
     };
 
-    // Base tmpfs root layout: only overlayer/syshub, home, root, and the
-    // standard virtual filesystem mountpoints live at the true root.
-    // No bin/sbin/usr/lib/etc. `run` is deliberately not created here
-    // — switch.rs's MS_MOVE step creates it when it moves the initramfs's
-    // own /run into place, right before pivot_root.
+    // the root holds only overlayer, home, root and the virtual filesystems; switch.rs adds run
     fs::create_dir_all(&merged).map_err(|e| format!("create {}: {}", merged, e))?;
     for name in ["home", "root", "dev", "proc", "sys", "tmp"] {
         let dir = format!("{}/{}", root, name);
         fs::create_dir_all(&dir).map_err(|e| format!("create {}: {}", dir, e))?;
     }
 
-    // systemd's StateDirectory=/CacheDirectory=/LogsDirectory= (used by
-    // logind.service and plenty of other units) always resolve against
-    // the real root's /var/lib etc, completely independent of any
-    // --localstatedir build option -- confirmed live: systemd-logind
-    // crash-looped with "Failed to set up special execution directory
-    // in /var/lib: No such file or directory" because there's no real
-    // /var at all at Zainium's true root. A plain symlink is enough for
-    // every unit that will ever hit this, not just logind.
+    // systemd's StateDirectory= and friends need a real /var: link it to the base's var
     let var_link = format!("{}/var", root);
     if !std::path::Path::new(&var_link).exists() {
         std::os::unix::fs::symlink("/overlayer/syshub/var", &var_link)
@@ -187,8 +79,7 @@ pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
 
     klog!("  ✓ OverlayFS → {}", merged);
 
-    // Bind mount /home and /root separately so user data is not part of the
-    // writable overlay — both must survive a zexlib rollback untouched.
+    // home and root are bind mounts, so a zexlib rollback never touches user data
     if zexlib_src == "/run/zexlib" {
         // Live boot: zairoot is the read-only image, so give home/root a tmpfs upper layer.
         overlay_live_dir(zairoot, "home")?;
@@ -198,12 +89,7 @@ pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
         bind_persistent_dir(zairoot, "root")?;
     }
 
-    // Also expose zaisys and zexlib as their own visible directories under
-    // /overlayer, alongside the merged syshub — matching the real Zainium
-    // layout (overlayer/{syshub,zaisys,zexlib}, three siblings). The merge
-    // above already links zexlib/union's content into the syshub view; this
-    // additionally makes zaisys/zexlib reachable at their own paths too,
-    // instead of only existing invisibly as merge inputs.
+    // zaisys and zexlib also show at their own paths under /overlayer, beside the merged syshub
     bind_ro_dir(
         &format!("{}/overlayer/zaisys", zairoot),
         &format!("{}/overlayer/zaisys", root),
@@ -214,8 +100,7 @@ pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
         &format!("{}/overlayer/.syshub-pending", zairoot),
         &format!("{}/overlayer/.syshub-pending", root),
     )?;
-    // every other overlayer entry on the disk shows at its own path too: directories
-    // (agents, ...), files (README.zainium, architecture.md, zex.md, ...) and symlinks
+    // every other overlayer entry on the disk (agents, the docs, links) shows at its own path too
     if let Ok(entries) = fs::read_dir(format!("{}/overlayer", zairoot)) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -285,8 +170,7 @@ fn bind_ro_file(src: &str, dest: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Bind mount `src` → `dest` read-only (two-step: bind, then remount ro —
-/// required by Linux, a plain bind mount inherits write access otherwise).
+/// Bind mounts `src` on `dest` read-only (a bind mount needs a second, read-only remount).
 fn bind_ro_dir(src: &str, dest: &str) -> Result<(), String> {
     if !std::path::Path::new(src).exists() {
         klog!("  '{}' not found — skipping bind mount", src);
@@ -313,11 +197,7 @@ fn bind_ro_dir(src: &str, dest: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Bind mount `/zairoot/{name}` → `/new_root/{name}` (used for `home` and `root`).
-///
-/// These directories must survive a zexlib rollback (which resets upperdir).
-/// Keeping them outside the overlay layer guarantees that: a rollback wipes
-/// installed packages but never touches user data.
+/// Bind mounts /zairoot/<name> on /new_root/<name>, outside the overlay, so a zexlib rollback never touches it.
 fn bind_persistent_dir(zairoot: &str, name: &str) -> Result<(), String> {
     let src = format!("{}/{}", zairoot, name);
     let dest = format!("/new_root/{}", name);
@@ -327,8 +207,7 @@ fn bind_persistent_dir(zairoot: &str, name: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    // Destination directory must already exist inside /new_root (created by
-    // mount_overlay's base-dirs pass above); create_dir_all is idempotent.
+    // mount_overlay made it already
     fs::create_dir_all(&dest).ok();
 
     mount(
@@ -404,14 +283,7 @@ fn tmpfs_zexlib() -> Result<(String, String), String> {
     Ok((upper, work))
 }
 
-/// Check whether the kernel cmdline contains `zainium.overlay=off`.
-///
-/// This is the rescue boot mechanism: add `zainium.overlay=off` to the
-/// bootloader entry (Limine, GRUB) to skip the OverlayFS layer and boot
-/// directly from the immutable syshub inside /zairoot.
-///
-/// Returns `true` if overlay should be skipped, `false` otherwise.
-/// If `/proc/cmdline` cannot be read (pre-Phase1 call), returns `false`.
+/// True when the cmdline has zainium.overlay=off: the rescue boot straight from syshub.
 pub fn overlay_disabled_by_cmdline() -> bool {
     std::fs::read_to_string("/proc/cmdline")
         .map(|s| s.split_whitespace().any(|tok| tok == "zainium.overlay=off"))

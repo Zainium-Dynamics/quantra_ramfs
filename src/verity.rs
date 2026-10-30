@@ -217,7 +217,9 @@ fn dm_version_check(fd: RawFd) -> Result<(), String> {
     }
     klog!(
         "    DM version: {}.{}.{}",
-        ioc.version[0], ioc.version[1], ioc.version[2]
+        ioc.version[0],
+        ioc.version[1],
+        ioc.version[2]
     );
     Ok(())
 }

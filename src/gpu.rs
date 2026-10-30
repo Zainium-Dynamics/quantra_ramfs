@@ -37,7 +37,11 @@ pub fn load_from_disk(zairoot: &str) -> usize {
     let mut devices = 0;
     for modalias in display_modaliases() {
         let mut loaded = false;
-        for module in aliases.iter().filter(|(p, _)| glob(p, &modalias)).map(|(_, m)| m) {
+        for module in aliases
+            .iter()
+            .filter(|(p, _)| glob(p, &modalias))
+            .map(|(_, m)| m)
+        {
             match load_with_deps(&moddir, module, &deps) {
                 Ok(()) => loaded = true,
                 Err(e) => klog!("  gpu: {module}: {e}"),
@@ -60,7 +64,14 @@ pub fn release() {
 
 fn bind_ro(src: &str, dest: &str) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    mount(Some(src), dest, None::<&str>, MsFlags::MS_BIND, None::<&str>).map_err(|e| e.to_string())?;
+    mount(
+        Some(src),
+        dest,
+        None::<&str>,
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
     mount(
         None::<&str>,
         dest,
@@ -81,7 +92,11 @@ fn display_modaliases() -> Vec<String> {
         if !fs::read_to_string(dev.join("class")).is_ok_and(|c| c.trim().starts_with("0x03")) {
             continue;
         }
-        let children = fs::read_dir(&dev).into_iter().flatten().flatten().map(|e| e.path());
+        let children = fs::read_dir(&dev)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path());
         // real subdirectories only: symlinks (driver, firmware_node, ...) lead elsewhere
         let children = children.filter(|c| fs::symlink_metadata(c).is_ok_and(|m| m.is_dir()));
         for d in std::iter::once(dev.clone()).chain(children) {
@@ -150,10 +165,12 @@ fn insmod(path: &str) -> Result<(), String> {
         return Ok(());
     }
     let f = fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
-    let flags = if path.ends_with(".ko") { 0 } else { MODULE_INIT_COMPRESSED_FILE };
-    let ret = unsafe {
-        libc::syscall(libc::SYS_finit_module, f.as_raw_fd(), c"".as_ptr(), flags)
+    let flags = if path.ends_with(".ko") {
+        0
+    } else {
+        MODULE_INIT_COMPRESSED_FILE
     };
+    let ret = unsafe { libc::syscall(libc::SYS_finit_module, f.as_raw_fd(), c"".as_ptr(), flags) };
     let err = std::io::Error::last_os_error();
     if ret != 0 && err.raw_os_error() != Some(libc::EEXIST) {
         return Err(format!("{path}: {err}"));
@@ -236,6 +253,9 @@ mod tests {
     #[test]
     fn module_names_from_paths() {
         assert_eq!(module_name("kernel/drivers/gpu/drm/i915/i915.ko"), "i915");
-        assert_eq!(module_name("kernel/drivers/gpu/drm/drm-kms.ko.zst"), "drm_kms");
+        assert_eq!(
+            module_name("kernel/drivers/gpu/drm/drm-kms.ko.zst"),
+            "drm_kms"
+        );
     }
 }

@@ -121,12 +121,24 @@ pub fn pivot_to_root(target: &BootTarget) -> Result<(), String> {
     let init_rel = target.init_path;
 
     // pivot_root needs a mount point: bind /new_root onto itself
-    mount(Some(new_root), new_root, None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REC, None::<&str>)
-        .map_err(|e| format!("self-bind-mount {}: {}", new_root, e))?;
+    mount(
+        Some(new_root),
+        new_root,
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .map_err(|e| format!("self-bind-mount {}: {}", new_root, e))?;
 
     // pivot_root also fails with EBUSY under shared mount propagation
-    mount(None::<&str>, "/", None::<&str>, MsFlags::MS_PRIVATE | MsFlags::MS_REC, None::<&str>)
-        .map_err(|e| format!("make-rprivate /: {}", e))?;
+    mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_PRIVATE | MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .map_err(|e| format!("make-rprivate /: {}", e))?;
 
     // Step 1: MS_MOVE pseudo-filesystems into new root
     for &mp in MOUNT_MOVE_ORDER {
@@ -176,17 +188,13 @@ pub fn pivot_to_root(target: &BootTarget) -> Result<(), String> {
     // programs under /overlayer/syshub need sys_resolver from their first instruction
     if init_rel.starts_with("/overlayer/syshub/")
         && init_rel != "/overlayer/syshub/bin/bash"
+        && Path::new("/overlayer/syshub/lib/libsys_resolver.so").exists()
     {
-        if Path::new("/overlayer/syshub/lib/libsys_resolver.so").exists() {
-            // SAFETY: still single-threaded, nothing else reads the environment
-            unsafe {
-                std::env::set_var(
-                    "LD_PRELOAD",
-                    "/overlayer/syshub/lib/libsys_resolver.so",
-                );
-            }
-            klog!("  ✓ sys_resolver: LD_PRELOAD armed for {init_rel}");
+        // SAFETY: still single-threaded, nothing else reads the environment
+        unsafe {
+            std::env::set_var("LD_PRELOAD", "/overlayer/syshub/lib/libsys_resolver.so");
         }
+        klog!("  ✓ sys_resolver: LD_PRELOAD armed for {init_rel}");
     }
 
     // init gets the console on fds 1/2, as the kernel would hand it

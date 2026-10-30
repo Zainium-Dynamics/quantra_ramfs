@@ -18,9 +18,19 @@ const FS_IOC_SETFLAGS: libc::c_ulong = 0x4008_6602;
 const FS_IMMUTABLE_FL: libc::c_long = 0x10;
 
 enum Entry {
-    File { mode: u32, sha: String, rel: PathBuf },
-    Link { target: PathBuf, rel: PathBuf },
-    Dir { mode: u32, rel: PathBuf },
+    File {
+        mode: u32,
+        sha: String,
+        rel: PathBuf,
+    },
+    Link {
+        target: PathBuf,
+        rel: PathBuf,
+    },
+    Dir {
+        mode: u32,
+        rel: PathBuf,
+    },
 }
 
 impl Entry {
@@ -90,7 +100,9 @@ fn apply(z: &Path, pending: &Path, rollback: &Path) -> Result<String, String> {
         .map_err(|e| format!("journal: {e}"))?;
 
     for e in entries.iter().filter(|e| matches!(e, Entry::Dir { .. })) {
-        let Entry::Dir { mode, rel } = e else { continue };
+        let Entry::Dir { mode, rel } = e else {
+            continue;
+        };
         let dst = base.join(rel);
         if !dst.is_dir() {
             log(&mut journal, 'D', rel)?;
@@ -119,17 +131,24 @@ fn apply(z: &Path, pending: &Path, rollback: &Path) -> Result<String, String> {
         // an old copy of this base file in the userland union would hide the new one; etc stays the user's
         if !rel.starts_with("etc") {
             let u = union.join(rel);
-            if fs::symlink_metadata(&u).map(|m| !m.is_dir()).unwrap_or(false) {
+            if fs::symlink_metadata(&u)
+                .map(|m| !m.is_dir())
+                .unwrap_or(false)
+            {
                 log(&mut journal, 'U', rel)?;
                 let keep = tdir.join("union").join(rel);
                 fs::create_dir_all(keep.parent().unwrap()).map_err(|e| e.to_string())?;
                 set_immutable(&u, false);
-                fs::rename(&u, &keep).map_err(|e| format!("move union copy {}: {e}", u.display()))?;
+                fs::rename(&u, &keep)
+                    .map_err(|e| format!("move union copy {}: {e}", u.display()))?;
             }
         }
     }
 
-    journal.write_all(b"COMMIT\n").and_then(|_| journal.sync_all()).map_err(|e| e.to_string())?;
+    journal
+        .write_all(b"COMMIT\n")
+        .and_then(|_| journal.sync_all())
+        .map_err(|e| e.to_string())?;
     drop(journal);
     set_tree_immutable(&tdir);
     Ok(txn)
@@ -145,8 +164,11 @@ fn place(staged: &Path, e: &Entry, dst: &Path) -> Result<(), String> {
         Entry::File { mode, rel, .. } => {
             let src = staged.join(rel);
             fs::copy(&src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(*mode)).map_err(|e| e.to_string())?;
-            File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(*mode))
+                .map_err(|e| e.to_string())?;
+            File::open(&tmp)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| e.to_string())?;
             // sealed before it takes the real name: once in the base, its content cannot be rewritten
             if let Err(e) = crate::baseverity::enable(&tmp) {
                 klog!("  ⚠ fs-verity: {}: {e}", dst.display());
@@ -197,19 +219,26 @@ fn rollback_last(z: &Path, rollback: &Path) -> Result<Option<String>, String> {
         .filter(|n| committed(&rollback.join(n)))
         .collect();
     txns.sort();
-    let Some(txn) = txns.pop() else { return Ok(None) };
+    let Some(txn) = txns.pop() else {
+        return Ok(None);
+    };
     undo(z, &rollback.join(&txn))?;
     Ok(Some(txn))
 }
 
 /// A txn without COMMIT means power was lost mid-apply: put the base back exactly as it was.
 fn recover_incomplete(z: &Path, rollback: &Path) {
-    let Ok(dir) = fs::read_dir(rollback) else { return };
+    let Ok(dir) = fs::read_dir(rollback) else {
+        return;
+    };
     for d in dir.filter_map(|d| d.ok()) {
         let tdir = d.path();
         if tdir.is_dir() && !committed(&tdir) {
             match undo(z, &tdir) {
-                Ok(()) => klog!("  ⚠ syshub: interrupted upgrade {} undone", d.file_name().to_string_lossy()),
+                Ok(()) => klog!(
+                    "  ⚠ syshub: interrupted upgrade {} undone",
+                    d.file_name().to_string_lossy()
+                ),
                 Err(e) => klog!("  ✗ syshub: cannot undo interrupted upgrade: {e}"),
             }
         }
@@ -253,7 +282,8 @@ fn undo(z: &Path, tdir: &Path) -> Result<(), String> {
                 if fs::symlink_metadata(&bak).is_ok() {
                     set_immutable(&dst, false);
                     let _ = fs::remove_file(&dst);
-                    fs::rename(&bak, &dst).map_err(|e| format!("restore {}: {e}", dst.display()))?;
+                    fs::rename(&bak, &dst)
+                        .map_err(|e| format!("restore {}: {e}", dst.display()))?;
                 }
             }
             'N' => {
@@ -281,7 +311,10 @@ fn read_manifest(path: &Path) -> Result<Vec<Entry>, String> {
                 sha: sha.to_string(),
                 rel: PathBuf::from(rel),
             },
-            ["l", target, rel] => Entry::Link { target: PathBuf::from(target), rel: PathBuf::from(rel) },
+            ["l", target, rel] => Entry::Link {
+                target: PathBuf::from(target),
+                rel: PathBuf::from(rel),
+            },
             ["d", mode, rel] => Entry::Dir {
                 mode: u32::from_str_radix(mode, 8).map_err(|_| bad())?,
                 rel: PathBuf::from(rel),
@@ -289,7 +322,10 @@ fn read_manifest(path: &Path) -> Result<Vec<Entry>, String> {
             _ => return Err(bad()),
         };
         if !safe_rel(entry.rel()) {
-            return Err(format!("unsafe path in manifest: {}", entry.rel().display()));
+            return Err(format!(
+                "unsafe path in manifest: {}",
+                entry.rel().display()
+            ));
         }
         out.push(entry);
     }
@@ -323,7 +359,11 @@ fn empty_dir(dir: &Path) {
     if let Ok(rd) = fs::read_dir(dir) {
         for d in rd.filter_map(|d| d.ok()) {
             let p = d.path();
-            let _ = if p.is_dir() && !p.is_symlink() { fs::remove_dir_all(&p) } else { fs::remove_file(&p) };
+            let _ = if p.is_dir() && !p.is_symlink() {
+                fs::remove_dir_all(&p)
+            } else {
+                fs::remove_file(&p)
+            };
         }
     }
 }
@@ -332,7 +372,10 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     if let Ok(rd) = fs::read_dir(dir) {
         for d in rd.filter_map(|d| d.ok()) {
             let p = d.path();
-            if fs::symlink_metadata(&p).map(|m| m.is_dir()).unwrap_or(false) {
+            if fs::symlink_metadata(&p)
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+            {
                 walk(&p, out);
             }
             out.push(p);
@@ -360,7 +403,9 @@ fn set_tree_immutable(dir: &Path) {
 
 /// chattr ±i; symlinks and filesystems without inode flags are skipped silently.
 fn set_immutable(path: &Path, on: bool) {
-    let Ok(meta) = fs::symlink_metadata(path) else { return };
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return;
+    };
     if meta.file_type().is_symlink() || meta.mode() & libc::S_IFMT == libc::S_IFSOCK {
         return;
     }
@@ -372,7 +417,11 @@ fn set_immutable(path: &Path, on: bool) {
         if libc::ioctl(fd, FS_IOC_GETFLAGS as _, &mut flags) != 0 {
             return;
         }
-        let new = if on { flags | FS_IMMUTABLE_FL } else { flags & !FS_IMMUTABLE_FL };
+        let new = if on {
+            flags | FS_IMMUTABLE_FL
+        } else {
+            flags & !FS_IMMUTABLE_FL
+        };
         if new != flags {
             libc::ioctl(fd, FS_IOC_SETFLAGS as _, &new);
         }

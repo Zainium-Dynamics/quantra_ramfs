@@ -21,7 +21,9 @@ pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
     let phys_upper = format!("{}/overlayer/zexlib/union", zairoot);
     let phys_work = format!("{}/overlayer/zexlib/work", zairoot);
     let phys_zexlib = format!("{}/overlayer/zexlib", zairoot);
-    let (upper, work, zexlib_src) = match fs::create_dir_all(&phys_upper).and_then(|_| fs::create_dir_all(&phys_work)) {
+    let (upper, work, zexlib_src) = match fs::create_dir_all(&phys_upper)
+        .and_then(|_| fs::create_dir_all(&phys_work))
+    {
         Ok(()) => {
             // staged `zex syshub -u` upgrades go into the base here, while nothing has it mounted
             crate::pending::run(zairoot);

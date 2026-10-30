@@ -272,65 +272,67 @@ fn main() -> ! {
             emergency::shell("live root mount");
         }
     } else {
-    let root_device = match rootfs::find_root(&cmdline) {
-        Ok(dev) => {
-            ok(format!("Root device: {dev:?}"));
-            dev
-        }
-        Err(e) => {
-            fail(format!("Root device not found: {e}"));
-            emergency::shell("root detect");
-        }
-    };
-
-    // fsck before mounting (skipped for squashfs/iso/loop/NFS)
-    if cmdline.fsck_enabled {
-        let fstype_ref = cmdline.root_fstype.as_deref();
-        if let Err(e) = fsck::check_root(&root_device, fstype_ref) {
-            if e.contains("REBOOT REQUIRED") {
-                warn("Filesystem check failed — rebooting in 3s");
-                std::thread::sleep(Duration::from_secs(3));
-                unsafe {
-                    libc::sync();
-                    libc::reboot(libc::RB_AUTOBOOT);
-                }
-                loop {
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            } else {
-                warn(format!("Filesystem check: {e} — continuing"));
-            }
-        }
-    }
-
-    // dm-verity: set up verified device before mounting
-    let actual_root_device = if cmdline.verity_enabled {
-        match setup_verity_device(&cmdline, &root_device) {
-            Ok(verified_dev) => {
-                ok(format!("dm-verity: {verified_dev}"));
-                verified_dev
+        let root_device = match rootfs::find_root(&cmdline) {
+            Ok(dev) => {
+                ok(format!("Root device: {dev:?}"));
+                dev
             }
             Err(e) => {
-                fail(format!("dm-verity setup failed: {e}"));
-                emergency::shell("dm-verity failed");
+                fail(format!("Root device not found: {e}"));
+                emergency::shell("root detect");
+            }
+        };
+
+        // fsck before mounting (skipped for squashfs/iso/loop/NFS)
+        if cmdline.fsck_enabled {
+            let fstype_ref = cmdline.root_fstype.as_deref();
+            if let Err(e) = fsck::check_root(&root_device, fstype_ref) {
+                if e.contains("REBOOT REQUIRED") {
+                    warn("Filesystem check failed — rebooting in 3s");
+                    std::thread::sleep(Duration::from_secs(3));
+                    unsafe {
+                        libc::sync();
+                        libc::reboot(libc::RB_AUTOBOOT);
+                    }
+                    loop {
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                } else {
+                    warn(format!("Filesystem check: {e} — continuing"));
+                }
             }
         }
-    } else {
-        root_device.clone()
-    };
 
-    // Mount root
-    if let Err(e) = rootfs::mount_root_at(&actual_root_device, &cmdline, zairoot) {
-        fail(format!("Root mount failed: {e}"));
-        emergency::shell("root mount");
-    }
+        // dm-verity: set up verified device before mounting
+        let actual_root_device = if cmdline.verity_enabled {
+            match setup_verity_device(&cmdline, &root_device) {
+                Ok(verified_dev) => {
+                    ok(format!("dm-verity: {verified_dev}"));
+                    verified_dev
+                }
+                Err(e) => {
+                    fail(format!("dm-verity setup failed: {e}"));
+                    emergency::shell("dm-verity failed");
+                }
+            }
+        } else {
+            root_device.clone()
+        };
+
+        // Mount root
+        if let Err(e) = rootfs::mount_root_at(&actual_root_device, &cmdline, zairoot) {
+            fail(format!("Root mount failed: {e}"));
+            emergency::shell("root mount");
+        }
     }
     ok(format!("Mounted root filesystem → {zairoot}"));
 
     // the splash starts on the disk's display driver, so there is no framebuffer hand-over later
     let displays = gpu::load_from_disk(zairoot);
     if displays > 0 {
-        ok(format!("Display driver loaded from the root disk ({displays} device(s))"));
+        ok(format!(
+            "Display driver loaded from the root disk ({displays} device(s))"
+        ));
     }
     if plymouth::is_enabled() {
         plymouth::setup_kms_framebuffer();
@@ -362,7 +364,9 @@ fn main() -> ! {
                 r
             }
             Err(e) => {
-                warn(format!("OverlayFS failed: {e} — read-only fallback to {zairoot}"));
+                warn(format!(
+                    "OverlayFS failed: {e} — read-only fallback to {zairoot}"
+                ));
                 zairoot.to_string()
             }
         }
@@ -401,7 +405,10 @@ fn main() -> ! {
 
     // Complete
     set_phase(BootPhase::COMPLETE);
-    ok(format!("Boot complete ({}ms)", boot_start.elapsed().as_millis()));
+    ok(format!(
+        "Boot complete ({}ms)",
+        boot_start.elapsed().as_millis()
+    ));
 
     emergency::shell("execv returned unexpectedly");
 }

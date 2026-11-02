@@ -114,6 +114,10 @@ cp "$SYSHUB/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf" "$fonts/Plymouth-
 cp "$SYSHUB/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf" "$fonts/Plymouth-monospace-bold.ttf"
 
 # Build the archive.
-( cd "$STAGE" && find . | cpio -o -H newc 2>/dev/null ) | gzip -9 > "$OUT"
+if command -v cpio >/dev/null; then
+    ( cd "$STAGE" && find . | cpio -o -H newc 2>/dev/null ) | gzip -9 > "$OUT"
+else
+    ( cd "$STAGE" && chmod 755 . && bsdtar --format newc --uid 0 --gid 0 -cf - . ) | gzip -9 > "$OUT"
+fi
 
 echo "Wrote $OUT ($(du -h "$OUT" | cut -f1))"

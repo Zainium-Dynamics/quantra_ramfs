@@ -51,8 +51,11 @@ pub fn mount_overlay(zairoot: &str, live: bool, rescue: bool) -> Result<String, 
     };
     mount_sealed(&merged, &opts)?;
     for d in ["etc", "var"] {
-        let opts =
-            format!("lowerdir={base}/{d},upperdir={zexlib}/union/{d},workdir={zexlib}/work-{d}");
+        // union/{d} is inside the syshub overlay's upper dir, whose view of it this mount covers:
+        // only the exclusive-upper check (index=on) stands in the way
+        let opts = format!(
+            "lowerdir={base}/{d},upperdir={zexlib}/union/{d},workdir={zexlib}/work-{d},index=off"
+        );
         let target = format!("{merged}/{d}");
         mount(
             Some("overlay"),

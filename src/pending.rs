@@ -17,6 +17,7 @@ const FS_IOC_GETFLAGS: libc::c_ulong = 0x8008_6601;
 const FS_IOC_SETFLAGS: libc::c_ulong = 0x4008_6602;
 const FS_IMMUTABLE_FL: libc::c_long = 0x10;
 
+#[derive(Debug)]
 enum Entry {
     File {
         mode: u32,
@@ -93,6 +94,9 @@ fn apply(z: &Path, pending: &Path, rollback: &Path) -> Result<String, String> {
     verify(&staged, &entries)?;
 
     let base = z.join(BASE);
+    for e in &entries {
+        no_symlink_parent(&base, e.rel())?;
+    }
     let union = z.join(UNION);
     let tdir = rollback.join(&txn);
     if tdir.exists() {
@@ -119,6 +123,7 @@ fn apply(z: &Path, pending: &Path, rollback: &Path) -> Result<String, String> {
 
     for e in entries.iter().filter(|e| !matches!(e, Entry::Dir { .. })) {
         let rel = e.rel();
+        no_symlink_parent(&base, rel)?;
         let dst = base.join(rel);
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -151,6 +156,8 @@ fn apply(z: &Path, pending: &Path, rollback: &Path) -> Result<String, String> {
         }
     }
 
+    // every rename above reaches the disk before the journal says the upgrade happened
+    sync_fs(&base)?;
     journal
         .write_all(b"COMMIT\n")
         .and_then(|_| journal.sync_all())
@@ -192,6 +199,7 @@ fn place(staged: &Path, e: &Entry, dst: &Path) -> Result<(), String> {
 
 fn verify(staged: &Path, entries: &[Entry]) -> Result<(), String> {
     for e in entries {
+        no_symlink_parent(staged, e.rel())?;
         let p = staged.join(e.rel());
         match e {
             Entry::File { sha, .. } => {
@@ -273,35 +281,71 @@ fn undo(z: &Path, tdir: &Path) -> Result<(), String> {
             continue;
         }
         let dst = base.join(rel);
+        // a copy that power loss left half placed
+        let tmp = dst.with_file_name(format!(
+            ".{}.zexnew",
+            dst.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        gone(fs::remove_file(&tmp), &tmp)?;
         match k {
             'U' => {
                 let keep = tdir.join("union").join(rel);
                 if fs::symlink_metadata(&keep).is_ok() {
                     let u = union.join(rel);
-                    let _ = fs::create_dir_all(u.parent().unwrap());
-                    let _ = fs::rename(&keep, &u);
+                    if let Some(parent) = u.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|e| format!("{}: {e}", parent.display()))?;
+                    }
+                    fs::rename(&keep, &u)
+                        .map_err(|e| format!("restore union copy {}: {e}", u.display()))?;
                 }
             }
             'B' => {
                 let bak = tdir.join("files").join(rel);
                 if fs::symlink_metadata(&bak).is_ok() {
                     set_immutable(&dst, false);
-                    let _ = fs::remove_file(&dst);
+                    gone(fs::remove_file(&dst), &dst)?;
                     fs::rename(&bak, &dst)
                         .map_err(|e| format!("restore {}: {e}", dst.display()))?;
                 }
             }
             'N' => {
                 set_immutable(&dst, false);
-                let _ = fs::remove_file(&dst);
+                gone(fs::remove_file(&dst), &dst)?;
             }
             'D' => {
-                let _ = fs::remove_dir(&dst);
+                gone(fs::remove_dir(&dst), &dst)?;
             }
             _ => {}
         }
     }
+    // the restored base reaches the disk before the journal that could redo this undo is gone
+    sync_fs(&base)?;
     fs::remove_dir_all(tdir).map_err(|e| format!("remove {}: {e}", tdir.display()))
+}
+
+/// syncfs(2) on the filesystem holding `path`.
+fn sync_fs(path: &Path) -> Result<(), String> {
+    let f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // SAFETY: the descriptor stays open for the call
+    if unsafe { libc::syncfs(std::os::unix::io::AsRawFd::as_raw_fd(&f)) } != 0 {
+        return Err(format!(
+            "syncfs {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Ok when the thing is already gone: an undo may run again after another power loss.
+fn gone(r: std::io::Result<()>, what: &Path) -> Result<(), String> {
+    match r {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("{}: {e}", what.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn read_manifest(path: &Path) -> Result<Vec<Entry>, String> {
@@ -337,7 +381,63 @@ fn read_manifest(path: &Path) -> Result<Vec<Entry>, String> {
     if out.is_empty() {
         return Err("empty manifest".into());
     }
+    // one entry per path, and nothing below a path that is not a directory
+    let mut kinds = std::collections::HashMap::new();
+    for e in &out {
+        if kinds
+            .insert(e.rel().to_path_buf(), matches!(e, Entry::Dir { .. }))
+            .is_some()
+        {
+            return Err(format!("manifest lists {} twice", e.rel().display()));
+        }
+    }
+    for e in &out {
+        for a in e
+            .rel()
+            .ancestors()
+            .skip(1)
+            .filter(|a| !a.as_os_str().is_empty())
+        {
+            if kinds.get(a) == Some(&false) {
+                return Err(format!(
+                    "manifest puts {} below the non-directory {}",
+                    e.rel().display(),
+                    a.display()
+                ));
+            }
+        }
+    }
     Ok(out)
+}
+
+/// No directory on the way from `root` to `rel` may be a symlink: it could lead out of `root`.
+fn no_symlink_parent(root: &Path, rel: &Path) -> Result<(), String> {
+    let mut p = root.to_path_buf();
+    let comps: Vec<_> = rel.components().collect();
+    for c in &comps[..comps.len().saturating_sub(1)] {
+        p.push(c);
+        match fs::symlink_metadata(&p) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(format!(
+                    "{} goes through the symlink {}",
+                    rel.display(),
+                    p.display()
+                ));
+            }
+            Ok(m) if !m.is_dir() => {
+                return Err(format!(
+                    "{} goes through the non-directory {}",
+                    rel.display(),
+                    p.display()
+                ));
+            }
+            Ok(_) => {}
+            // nothing further down exists yet, so nothing further down can be a link
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("{}: {e}", p.display())),
+        }
+    }
+    Ok(())
 }
 
 fn safe_rel(rel: &Path) -> bool {
@@ -435,4 +535,157 @@ fn set_immutable(path: &Path, on: bool) {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pending-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join(BASE)).unwrap();
+        fs::create_dir_all(d.join(UNION)).unwrap();
+        d
+    }
+
+    fn stage(z: &Path, files: &[(&str, &str)]) -> (PathBuf, PathBuf) {
+        let pending = z.join(PENDING);
+        let rollback = z.join(ROLLBACK);
+        fs::create_dir_all(pending.join("root")).unwrap();
+        fs::create_dir_all(&rollback).unwrap();
+        let mut manifest = String::new();
+        for (rel, data) in files {
+            let p = pending.join("root").join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, data).unwrap();
+            let sha = hex(&crate::measured_boot::sha256(data.as_bytes()));
+            manifest.push_str(&format!("f\t644\t{sha}\t{rel}\n"));
+        }
+        fs::write(pending.join("manifest"), manifest).unwrap();
+        fs::write(pending.join("READY"), "t1\n").unwrap();
+        (pending, rollback)
+    }
+
+    #[test]
+    fn apply_then_rollback_restores_the_base() {
+        let z = tmp("apply");
+        fs::create_dir_all(z.join(BASE).join("bin")).unwrap();
+        fs::write(z.join(BASE).join("bin/old"), "v1").unwrap();
+        fs::create_dir_all(z.join(UNION).join("bin")).unwrap();
+        fs::write(z.join(UNION).join("bin/old"), "union").unwrap();
+        let (pending, rollback) = stage(&z, &[("bin/old", "v2"), ("bin/new", "n")]);
+
+        assert_eq!(apply(&z, &pending, &rollback).unwrap(), "t1");
+        assert_eq!(
+            fs::read_to_string(z.join(BASE).join("bin/old")).unwrap(),
+            "v2"
+        );
+        assert_eq!(
+            fs::read_to_string(z.join(BASE).join("bin/new")).unwrap(),
+            "n"
+        );
+        assert!(
+            !z.join(UNION).join("bin/old").exists(),
+            "union copy must not hide the upgrade"
+        );
+
+        assert_eq!(rollback_last(&z, &rollback).unwrap().as_deref(), Some("t1"));
+        assert_eq!(
+            fs::read_to_string(z.join(BASE).join("bin/old")).unwrap(),
+            "v1"
+        );
+        assert!(!z.join(BASE).join("bin/new").exists());
+        assert_eq!(
+            fs::read_to_string(z.join(UNION).join("bin/old")).unwrap(),
+            "union"
+        );
+        let _ = fs::remove_dir_all(&z);
+    }
+
+    #[test]
+    fn interrupted_apply_is_undone_at_every_stage() {
+        // power lost after each journal line: the base must come back as it was
+        for stop in 0..3 {
+            let z = tmp(&format!("crash{stop}"));
+            fs::create_dir_all(z.join(BASE).join("bin")).unwrap();
+            fs::write(z.join(BASE).join("bin/a"), "old").unwrap();
+            let rollback = z.join(ROLLBACK);
+            let tdir = rollback.join("t9");
+            fs::create_dir_all(tdir.join("files/bin")).unwrap();
+            let mut journal = String::new();
+            if stop >= 1 {
+                // 'B' logged and the original moved aside
+                journal.push_str("B\tbin/a\n");
+                fs::rename(z.join(BASE).join("bin/a"), tdir.join("files/bin/a")).unwrap();
+            }
+            if stop >= 2 {
+                // the new file half placed, then in place
+                fs::write(z.join(BASE).join("bin/.a.zexnew"), "half").unwrap();
+                fs::write(z.join(BASE).join("bin/a"), "new").unwrap();
+                journal.push_str("N\tbin/b\n");
+                fs::write(z.join(BASE).join("bin/b"), "new").unwrap();
+            }
+            fs::write(tdir.join("journal"), journal).unwrap();
+
+            recover_incomplete(&z, &rollback).unwrap();
+            assert_eq!(
+                fs::read_to_string(z.join(BASE).join("bin/a")).unwrap(),
+                "old",
+                "stage {stop}"
+            );
+            assert!(!z.join(BASE).join("bin/b").exists(), "stage {stop}");
+            assert!(!z.join(BASE).join("bin/.a.zexnew").exists(), "stage {stop}");
+            assert!(!tdir.exists(), "stage {stop}");
+            // a second recovery (another power loss) changes nothing
+            recover_incomplete(&z, &rollback).unwrap();
+            let _ = fs::remove_dir_all(&z);
+        }
+    }
+
+    #[test]
+    fn bad_checksum_leaves_the_base_alone() {
+        let z = tmp("sha");
+        fs::create_dir_all(z.join(BASE).join("bin")).unwrap();
+        fs::write(z.join(BASE).join("bin/a"), "old").unwrap();
+        let (pending, rollback) = stage(&z, &[("bin/a", "new")]);
+        fs::write(pending.join("root/bin/a"), "tampered").unwrap();
+        assert!(apply(&z, &pending, &rollback).is_err());
+        assert_eq!(
+            fs::read_to_string(z.join(BASE).join("bin/a")).unwrap(),
+            "old"
+        );
+        let _ = fs::remove_dir_all(&z);
+    }
+
+    #[test]
+    fn symlink_parent_is_refused() {
+        let z = tmp("link");
+        let outside = z.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, z.join(BASE).join("lnk")).unwrap();
+        let (pending, rollback) = stage(&z, &[("lnk/evil", "x")]);
+        let err = apply(&z, &pending, &rollback).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(!outside.join("evil").exists());
+        let _ = fs::remove_dir_all(&z);
+    }
+
+    #[test]
+    fn manifest_rejects_duplicates_and_type_collisions() {
+        let z = tmp("manifest");
+        let m = z.join("m");
+        let sha = "0".repeat(64);
+        fs::write(&m, format!("f\t644\t{sha}\tbin/a\nf\t644\t{sha}\tbin/a\n")).unwrap();
+        assert!(read_manifest(&m).unwrap_err().contains("twice"));
+        fs::write(
+            &m,
+            format!("f\t644\t{sha}\tbin/a\nf\t644\t{sha}\tbin/a/b\n"),
+        )
+        .unwrap();
+        assert!(read_manifest(&m).unwrap_err().contains("non-directory"));
+        fs::write(&m, format!("f\t644\t{sha}\t../etc/passwd\n")).unwrap();
+        assert!(read_manifest(&m).unwrap_err().contains("unsafe"));
+        let _ = fs::remove_dir_all(&z);
+    }
 }

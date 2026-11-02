@@ -2,124 +2,134 @@
 
 use std::fs::{self, File};
 use std::io;
-use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::os::fd::AsFd;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
-const FS_IOC_GETFLAGS: libc::c_ulong = 0x8008_6601;
-const FS_IOC_ENABLE_VERITY: libc::c_ulong = 0x4080_6685; // _IOW('f', 133, struct fsverity_enable_arg)
-const FS_VERITY_FL: libc::c_long = 0x0010_0000;
-const FS_VERITY_HASH_ALG_SHA256: u32 = 1;
+use fs_verity::InnerHashAlgorithm;
+use fs_verity::linux::{fsverity_enable, fsverity_is_enabled};
 
-const MARKER: &str = "overlayer/syshub/engine/.fsverity";
-const TREES: [&str; 2] = ["overlayer/syshub", "overlayer/zaisys/kernel"];
+/// Sealed on every boot; a file that cannot be sealed stops the boot.
+const BASE: [&str; 2] = ["overlayer/syshub", "overlayer/zaisys"];
+/// zex-installed software: sealed on every boot, except its etc and var, which stay writable.
+const UNION: &str = "overlayer/zexlib/union";
+const UNION_WRITABLE: [&str; 2] = ["etc", "var"];
 
-/// Shown on the splash while the base is sealed for the first time.
+/// Shown on the splash while files are sealed.
 const SEALING: &str = "Securing the system…";
-
-#[repr(C)]
-struct EnableArg {
-    version: u32,
-    hash_algorithm: u32,
-    block_size: u32,
-    salt_size: u32,
-    salt_ptr: u64,
-    sig_size: u32,
-    reserved1: u32,
-    sig_ptr: u64,
-    reserved2: [u64; 11],
-}
 
 /// Turns on fs-verity for one file: Ok(true) if done now, Ok(false) if it already had it.
 pub fn enable(path: &Path) -> io::Result<bool> {
     let f = File::open(path)?;
-    let fd = f.as_raw_fd();
-    let mut flags: libc::c_long = 0;
-    // SAFETY: fd is open for the lifetime of `f`; FS_IOC_GETFLAGS writes one long into `flags`.
-    if unsafe { libc::ioctl(fd, FS_IOC_GETFLAGS as _, &mut flags) } == 0
-        && flags & FS_VERITY_FL != 0
-    {
+    if fsverity_is_enabled(f.as_fd())? {
         return Ok(false);
     }
-    let arg = EnableArg {
-        version: 1,
-        hash_algorithm: FS_VERITY_HASH_ALG_SHA256,
-        block_size: 4096,
-        salt_size: 0,
-        salt_ptr: 0,
-        sig_size: 0,
-        reserved1: 0,
-        sig_ptr: 0,
-        reserved2: [0; 11],
-    };
-    // SAFETY: `arg` matches struct fsverity_enable_arg (128 bytes) and outlives the call.
-    if unsafe { libc::ioctl(fd, FS_IOC_ENABLE_VERITY as _, &arg) } == 0 {
-        return Ok(true);
+    match fsverity_enable(f, 4096, InnerHashAlgorithm::Sha256, &[]) {
+        Ok(()) => Ok(true),
+        Err(e) if e.raw_os_error() == Some(libc::EEXIST) => Ok(false),
+        Err(e) => Err(e),
     }
-    let e = io::Error::last_os_error();
-    if e.raw_os_error() == Some(libc::EEXIST) {
-        return Ok(false);
-    }
-    Err(e)
 }
 
 /// The filesystem cannot do fs-verity at all (no `verity` feature, or not ext4/btrfs/f2fs).
-fn unsupported(e: &io::Error) -> bool {
+pub fn unsupported(e: &io::Error) -> bool {
     matches!(
         e.raw_os_error(),
         Some(libc::EOPNOTSUPP) | Some(libc::ENOTTY) | Some(libc::EINVAL)
     )
 }
 
-/// Installed disk only: seal the whole base once. Later upgrades seal their own files.
-pub fn ensure_base(zairoot: &str) {
+/// Installed disk only: seals every base, zaisys and union file that is not sealed yet, on all CPUs.
+pub fn ensure_base(zairoot: &str) -> Result<(), String> {
     let z = Path::new(zairoot);
-    if z.join(MARKER).exists() {
-        return;
+    let mut base = Vec::new();
+    for t in BASE {
+        walk(&z.join(t), &[], &mut base).map_err(|e| format!("scan {t}: {e}"))?;
     }
-    let mut files = Vec::new();
-    for t in TREES {
-        walk(&z.join(t), &mut files);
+    let mut union = Vec::new();
+    let u = z.join(UNION);
+    if u.is_dir() {
+        walk(&u, &UNION_WRITABLE, &mut union).map_err(|e| format!("scan {UNION}: {e}"))?;
     }
-    crate::plymouth::show_message(SEALING);
-    let (mut sealed, mut failed) = (0usize, 0usize);
-    for f in &files {
-        match enable(f) {
-            Ok(true) => sealed += 1,
-            Ok(false) => {}
-            Err(e) if unsupported(&e) => {
-                klog!(
-                    "  ⚠ fs-verity: not available on this filesystem ({e}); base files stay writable by root"
-                );
-                crate::plymouth::hide_message(SEALING);
-                return;
-            }
-            Err(e) => {
-                failed += 1;
-                if failed <= 5 {
-                    klog!("  ⚠ fs-verity: {}: {e}", f.display());
-                }
-            }
-        }
-    }
-    crate::plymouth::hide_message(SEALING);
-    if failed == 0 {
-        let _ = fs::write(z.join(MARKER), format!("{}\n", files.len()));
-    }
+
+    let (sealed, failed) = seal(&base)?;
     klog!(
-        "  ✓ fs-verity: {sealed} base files sealed ({} total, {failed} failed)",
-        files.len()
+        "  ✓ fs-verity: base and zaisys {} files, {sealed} sealed now",
+        base.len()
     );
+    if failed > 0 {
+        return Err(format!("{failed} base files could not be sealed"));
+    }
+    let (sealed, failed) = seal(&union)?;
+    klog!(
+        "  ✓ fs-verity: userland {} files, {sealed} sealed now, {failed} failed",
+        union.len()
+    );
+    Ok(())
 }
 
-/// Regular files under `dir`, without following symlinks.
-fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(rd) = fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let Ok(ft) = e.file_type() else { continue };
+/// Seals `files` in parallel: (sealed now, failed). A filesystem without fs-verity is an error.
+fn seal(files: &[PathBuf]) -> Result<(usize, usize), String> {
+    let sealed = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
+    let unsupported_fs = AtomicUsize::new(0);
+    let shown = AtomicUsize::new(0);
+    let next = AtomicUsize::new(0);
+    let workers = thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(16);
+    thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(f) = files.get(i) else { break };
+                    match enable(f) {
+                        Ok(true) => {
+                            // the splash only appears when there is real work
+                            if sealed.fetch_add(1, Ordering::Relaxed) == 0 {
+                                crate::plymouth::show_message(SEALING);
+                                shown.store(1, Ordering::Relaxed);
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(e) if unsupported(&e) => {
+                            unsupported_fs.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                        Err(e) => {
+                            if failed.fetch_add(1, Ordering::Relaxed) < 5 {
+                                klog!("  ⚠ fs-verity: {}: {e}", f.display());
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    if shown.into_inner() == 1 {
+        crate::plymouth::hide_message(SEALING);
+    }
+    if unsupported_fs.into_inner() > 0 {
+        return Err("the root filesystem has no fs-verity (tune2fs -O verity)".into());
+    }
+    Ok((sealed.into_inner(), failed.into_inner()))
+}
+
+/// Regular files under `dir` minus the top-level `skip` names, without following symlinks.
+fn walk(dir: &Path, skip: &[&str], out: &mut Vec<PathBuf>) -> io::Result<()> {
+    for e in fs::read_dir(dir)? {
+        let e = e?;
+        let ft = e.file_type()?;
+        if skip.iter().any(|s| e.file_name() == *s) {
+            continue;
+        }
         if ft.is_dir() {
-            walk(&e.path(), out);
+            walk(&e.path(), &[], out)?;
         } else if ft.is_file() {
             out.push(e.path());
         }
     }
+    Ok(())
 }

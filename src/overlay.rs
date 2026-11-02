@@ -2,87 +2,72 @@
 use nix::mount::{MsFlags, mount};
 use std::fs;
 
-/// Mounts the overlay at /new_root/overlayer/syshub over the disk mounted at `zairoot`.
-pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
-    // leftmost lower wins: syshub over zaisys
-    let lower = format!("{z}/overlayer/syshub:{z}/overlayer/zaisys", z = zairoot);
+/// Mounts the system view at /new_root/overlayer/syshub over the disk mounted at `zairoot`.
+///
+/// syshub is a sealed, read-only overlay of the base with the userland (zexlib/union) on top:
+/// nothing writes through it, root included, while zex installs straight into the union.
+/// etc and var are overlays of their own whose writes go to union/etc and union/var.
+/// `live` keeps the userland on a tmpfs; `rescue` leaves it out (base only).
+pub fn mount_overlay(zairoot: &str, live: bool, rescue: bool) -> Result<String, String> {
+    let base = format!("{zairoot}/overlayer/syshub");
     let root = "/new_root".to_string();
-    let merged = format!("{}/overlayer/syshub", root);
-
-    // Sanity check — ensure the Zainium disk layout is present
-    if !std::path::Path::new(&format!("{}/overlayer/syshub", zairoot)).exists() {
-        return Err(format!(
-            "syshub not found in '{}' — not a Zainium disk (overlayer/syshub missing)",
-            zairoot
-        ));
+    let merged = format!("{root}/overlayer/syshub");
+    if !std::path::Path::new(&base).is_dir() {
+        return Err(format!("{base} missing: not a Zainium disk"));
     }
 
-    // the live image is read-only, so its zexlib lives on a tmpfs for the session
-    let phys_upper = format!("{}/overlayer/zexlib/union", zairoot);
-    let phys_work = format!("{}/overlayer/zexlib/work", zairoot);
-    let phys_zexlib = format!("{}/overlayer/zexlib", zairoot);
-    let (upper, work, zexlib_src) = match fs::create_dir_all(&phys_upper)
-        .and_then(|_| fs::create_dir_all(&phys_work))
-    {
-        Ok(()) => {
-            // staged `zex syshub -u` upgrades go into the base here, while nothing has it mounted
-            crate::pending::run(zairoot);
-            crate::baseverity::ensure_base(zairoot);
-            (phys_upper, phys_work, phys_zexlib)
-        }
-        Err(e) => {
-            klog!(
-                "  zexlib not writable on {} ({e}) — using tmpfs zexlib (live session, not persistent)",
-                zairoot
-            );
-            let (u, w) = tmpfs_zexlib()?;
-            (u, w, "/run/zexlib".to_string())
-        }
+    let zexlib = if live || rescue {
+        tmpfs_zexlib()?
+    } else {
+        let zexlib = format!("{zairoot}/overlayer/zexlib");
+        writable(&zexlib)?;
+        // staged `zex syshub -u` upgrades go into the base here, while nothing has it mounted
+        crate::pending::run(zairoot).map_err(|e| format!("base upgrade: {e}"))?;
+        crate::baseverity::ensure_base(zairoot).map_err(|e| format!("fs-verity: {e}"))?;
+        zexlib
     };
+    for d in ["union/etc", "union/var", "work", "work-etc", "work-var"] {
+        let dir = format!("{zexlib}/{d}");
+        fs::create_dir_all(&dir).map_err(|e| format!("create {dir}: {e}"))?;
+    }
 
     // the root holds only overlayer, home, root and the virtual filesystems; switch.rs adds run
-    fs::create_dir_all(&merged).map_err(|e| format!("create {}: {}", merged, e))?;
+    fs::create_dir_all(&merged).map_err(|e| format!("create {merged}: {e}"))?;
     for name in ["home", "root", "dev", "proc", "sys", "tmp"] {
-        let dir = format!("{}/{}", root, name);
-        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {}", dir, e))?;
+        let dir = format!("{root}/{name}");
+        fs::create_dir_all(&dir).map_err(|e| format!("create {dir}: {e}"))?;
     }
-
-    // systemd's StateDirectory= and friends need a real /var: link it to the base's var
-    let var_link = format!("{}/var", root);
+    // services expect /var: it is the base's var, written to the union
+    let var_link = format!("{root}/var");
     if !std::path::Path::new(&var_link).exists() {
         std::os::unix::fs::symlink("/overlayer/syshub/var", &var_link)
-            .map_err(|e| format!("symlink {} -> /overlayer/syshub/var: {}", var_link, e))?;
+            .map_err(|e| format!("symlink {var_link}: {e}"))?;
     }
 
-    let opts = format!("lowerdir={},upperdir={},workdir={}", lower, upper, work);
-
-    klog!("  OverlayFS (Immutable Merge):");
-    klog!("    lower[0] = {}/overlayer/syshub  (priority)", zairoot);
-    klog!("    lower[1] = {}/overlayer/zaisys", zairoot);
-    klog!(
-        "    upper    = {}/overlayer/zexlib/union  (writable)",
-        zairoot
-    );
-    klog!("    merged   = {}", merged);
-
-    mount(
-        Some("overlay"),
-        merged.as_str(),
-        Some("overlay"),
-        MsFlags::empty(),
-        Some(opts.as_str()),
-    )
-    .map_err(|e| {
-        format!(
-            "OverlayFS mount failed: {} — is the 'overlay' kernel module loaded?",
-            e
+    let opts = if rescue {
+        format!("lowerdir={base}")
+    } else {
+        format!("lowerdir={base},upperdir={zexlib}/union,workdir={zexlib}/work,sealed")
+    };
+    mount_sealed(&merged, &opts)?;
+    for d in ["etc", "var"] {
+        let opts =
+            format!("lowerdir={base}/{d},upperdir={zexlib}/union/{d},workdir={zexlib}/work-{d}");
+        let target = format!("{merged}/{d}");
+        mount(
+            Some("overlay"),
+            target.as_str(),
+            Some("overlay"),
+            MsFlags::empty(),
+            Some(opts.as_str()),
         )
-    })?;
+        .map_err(|e| format!("overlay {target}: {e}"))?;
+    }
+    klog!("  ✓ /overlayer/syshub read-only, etc and var written to {zexlib}/union");
 
-    klog!("  ✓ OverlayFS → {}", merged);
-
+    let zexlib_src = zexlib;
     // home and root are bind mounts, so a zexlib rollback never touches user data
-    if zexlib_src == "/run/zexlib" {
+    if live {
         // Live boot: zairoot is the read-only image, so give home/root a tmpfs upper layer.
         overlay_live_dir(zairoot, "home")?;
         overlay_live_dir(zairoot, "root")?;
@@ -98,10 +83,12 @@ pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
     )?;
     bind_dir(&zexlib_src, &format!("{}/overlayer/zexlib", root))?;
     // root-only staging area for `zex syshub -u` (installed disk only, created by pending::run)
-    bind_dir(
-        &format!("{}/overlayer/.syshub-pending", zairoot),
-        &format!("{}/overlayer/.syshub-pending", root),
-    )?;
+    if !live && !rescue {
+        bind_dir(
+            &format!("{}/overlayer/.syshub-pending", zairoot),
+            &format!("{}/overlayer/.syshub-pending", root),
+        )?;
+    }
     // every other overlayer entry on the disk (agents, the docs, links) shows at its own path too
     if let Ok(entries) = fs::read_dir(format!("{}/overlayer", zairoot)) {
         for entry in entries.flatten() {
@@ -128,6 +115,31 @@ pub fn mount_overlay(zairoot: &str) -> Result<String, String> {
     }
 
     Ok(root)
+}
+
+/// Mounts the read-only system view; a kernel without sealed overlays gets a plain read-only one.
+fn mount_sealed(target: &str, opts: &str) -> Result<(), String> {
+    let ro = MsFlags::MS_RDONLY;
+    match mount(Some("overlay"), target, Some("overlay"), ro, Some(opts)) {
+        Ok(()) => Ok(()),
+        Err(nix::errno::Errno::EINVAL) if opts.ends_with(",sealed") => {
+            let plain = opts.trim_end_matches(",sealed");
+            mount(Some("overlay"), target, Some("overlay"), ro, Some(plain))
+                .map_err(|e| format!("overlay {target}: {e}"))?;
+            klog!(
+                "  ⚠ kernel has no sealed overlays: /overlayer/syshub is read-only but can be remounted"
+            );
+            Ok(())
+        }
+        Err(e) => Err(format!("overlay {target}: {e}")),
+    }
+}
+
+/// The installed disk's zexlib must take writes: a missing or read-only store stops the boot.
+fn writable(dir: &str) -> Result<(), String> {
+    let probe = format!("{dir}/.write-test");
+    fs::write(&probe, b"").map_err(|e| format!("{dir} is not writable: {e}"))?;
+    fs::remove_file(&probe).map_err(|e| format!("{probe}: {e}"))
 }
 
 /// Bind mount `src` → `dest` (writable), creating `dest` if needed.
@@ -265,8 +277,8 @@ fn overlay_live_dir(zairoot: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// tmpfs-backed zexlib fallback for a read-only zairoot (live boot).
-fn tmpfs_zexlib() -> Result<(String, String), String> {
+/// tmpfs-backed zexlib for a live session or a rescue boot (not persistent).
+fn tmpfs_zexlib() -> Result<String, String> {
     let base = "/run/zexlib";
     fs::create_dir_all(base).map_err(|e| format!("create {}: {}", base, e))?;
     mount(
@@ -277,12 +289,7 @@ fn tmpfs_zexlib() -> Result<(String, String), String> {
         None::<&str>,
     )
     .map_err(|e| format!("mount tmpfs at {}: {}", base, e))?;
-    let upper = format!("{}/union", base);
-    let work = format!("{}/work", base);
-    for dir in [&upper, &work] {
-        fs::create_dir_all(dir).map_err(|e| format!("create {}: {}", dir, e))?;
-    }
-    Ok((upper, work))
+    Ok(base.to_string())
 }
 
 /// True when the cmdline has zainium.overlay=off: the rescue boot straight from syshub.

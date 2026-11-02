@@ -354,22 +354,16 @@ fn main() -> ! {
     let overlay_enabled = !overlay::overlay_disabled_by_cmdline();
     measured_boot::measure_overlay_mode(overlay_enabled);
 
-    let new_root = if !overlay_enabled {
-        ok("OverlayFS disabled (zainium.overlay=off) — syshub only");
-        zairoot.to_string()
-    } else {
-        match overlay::mount_overlay(zairoot) {
-            Ok(r) => {
-                ok(format!("OverlayFS mounted → {r}"));
-                r
-            }
-            Err(e) => {
-                warn(format!(
-                    "OverlayFS failed: {e} — read-only fallback to {zairoot}"
-                ));
-                zairoot.to_string()
-            }
+    if !overlay_enabled {
+        ok("zainium.overlay=off: rescue boot, base only, nothing persists");
+    }
+    // no writable fallback: a boot without the read-only system view stops here
+    let new_root = match overlay::mount_overlay(zairoot, live_image.is_some(), !overlay_enabled) {
+        Ok(r) => {
+            ok(format!("OverlayFS mounted → {r}"));
+            r
         }
+        Err(e) => emergency::shell(&format!("OverlayFS failed: {e}")),
     };
 
     // Phase 5: Discover init binary (rescue mode overrides to bash, Zainium has no /bin/sh)

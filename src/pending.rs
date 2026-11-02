@@ -42,38 +42,44 @@ impl Entry {
 }
 
 /// Installed disk only: lock down the private dirs, finish/undo interrupted work, then apply or roll back.
-pub fn run(zairoot: &str) {
+/// An error means the base may not be in a known state, and normal boot must stop.
+pub fn run(zairoot: &str) -> Result<(), String> {
     let z = Path::new(zairoot);
     let pending = z.join(PENDING);
     let rollback = z.join(ROLLBACK);
     for dir in [&pending, &rollback] {
-        if let Err(e) = private_dir(dir) {
-            klog!("  ⚠ syshub: cannot prepare {}: {e}", dir.display());
-            return;
-        }
+        private_dir(dir).map_err(|e| format!("cannot prepare {}: {e}", dir.display()))?;
     }
-    recover_incomplete(z, &rollback);
+    recover_incomplete(z, &rollback)?;
 
     if pending.join("ROLLBACK").exists() {
         set_immutable(&pending.join("ROLLBACK"), false);
         match rollback_last(z, &rollback) {
             Ok(Some(txn)) => klog!("  ✓ syshub: rolled back upgrade {txn}"),
             Ok(None) => klog!("  ⚠ syshub: rollback requested but nothing to roll back"),
-            Err(e) => klog!("  ✗ syshub: rollback failed: {e}"),
+            // the request stays until a rollback succeeds
+            Err(e) => return Err(format!("rollback failed: {e}")),
         }
-        let _ = fs::remove_file(pending.join("ROLLBACK"));
+        fs::remove_file(pending.join("ROLLBACK")).map_err(|e| format!("ROLLBACK: {e}"))?;
     }
 
     if pending.join("READY").exists() {
         crate::plymouth::show_message(UPDATING);
         clear_tree_immutable(&pending);
-        match apply(z, &pending, &rollback) {
+        let applied = apply(z, &pending, &rollback);
+        crate::plymouth::hide_message(UPDATING);
+        match applied {
             Ok(txn) => klog!("  ✓ syshub: upgrade {txn} applied to base"),
-            Err(e) => klog!("  ✗ syshub: upgrade not applied, base unchanged: {e}"),
+            Err(e) => {
+                // undo whatever part of it reached the base before the upgrade is dropped
+                recover_incomplete(z, &rollback)
+                    .map_err(|u| format!("upgrade failed ({e}) and could not be undone: {u}"))?;
+                klog!("  ✗ syshub: upgrade not applied, base unchanged: {e}");
+            }
         }
         empty_dir(&pending);
-        crate::plymouth::hide_message(UPDATING);
     }
+    Ok(())
 }
 
 fn apply(z: &Path, pending: &Path, rollback: &Path) -> Result<String, String> {
@@ -170,8 +176,10 @@ fn place(staged: &Path, e: &Entry, dst: &Path) -> Result<(), String> {
                 .and_then(|f| f.sync_all())
                 .map_err(|e| e.to_string())?;
             // sealed before it takes the real name: once in the base, its content cannot be rewritten
-            if let Err(e) = crate::baseverity::enable(&tmp) {
-                klog!("  ⚠ fs-verity: {}: {e}", dst.display());
+            match crate::baseverity::enable(&tmp) {
+                Ok(_) => {}
+                Err(e) if crate::baseverity::unsupported(&e) => {}
+                Err(e) => return Err(format!("fs-verity {}: {e}", dst.display())),
             }
         }
         Entry::Link { target, .. } => {
@@ -227,22 +235,19 @@ fn rollback_last(z: &Path, rollback: &Path) -> Result<Option<String>, String> {
 }
 
 /// A txn without COMMIT means power was lost mid-apply: put the base back exactly as it was.
-fn recover_incomplete(z: &Path, rollback: &Path) {
+fn recover_incomplete(z: &Path, rollback: &Path) -> Result<(), String> {
     let Ok(dir) = fs::read_dir(rollback) else {
-        return;
+        return Ok(());
     };
     for d in dir.filter_map(|d| d.ok()) {
         let tdir = d.path();
         if tdir.is_dir() && !committed(&tdir) {
-            match undo(z, &tdir) {
-                Ok(()) => klog!(
-                    "  ⚠ syshub: interrupted upgrade {} undone",
-                    d.file_name().to_string_lossy()
-                ),
-                Err(e) => klog!("  ✗ syshub: cannot undo interrupted upgrade: {e}"),
-            }
+            let name = d.file_name().to_string_lossy().into_owned();
+            undo(z, &tdir).map_err(|e| format!("cannot undo interrupted upgrade {name}: {e}"))?;
+            klog!("  ⚠ syshub: interrupted upgrade {name} undone");
         }
     }
+    Ok(())
 }
 
 fn committed(tdir: &Path) -> bool {

@@ -30,11 +30,9 @@ const INIT_FALLBACKS: &[&str] = &[
 /// Moved into the new root before pivot_root; /dev goes first.
 const MOUNT_MOVE_ORDER: &[&str] = &["/dev", "/proc", "/sys", "/run"];
 
-/// The mount point and the init that pivot_to_root boots.
+/// The init that pivot_to_root boots from /new_root.
 #[derive(Debug)]
 pub struct BootTarget {
-    /// Where the physical disk is mounted; the pivot itself always goes to /new_root.
-    pub mount_point: &'static str,
     /// Init binary path relative to the root, e.g. /overlayer/syshub/lib/systemd/systemd.
     pub init_path: &'static str,
 }
@@ -73,21 +71,13 @@ pub fn discover_boot_target(cmdline: &Cmdline, new_root: &str) -> BootTarget {
         let full = format!("{}{}", new_root, cmdline_init);
         if Path::new(&full).exists() {
             klog!("  ✓ Using cmdline init={cmdline_init}");
-            let mount = MOUNT_TARGETS
-                .iter()
-                .find(|&&t| Path::new(t).exists())
-                .copied()
-                .unwrap_or(MOUNT_TARGETS[0]);
             // keep a &'static str: use the matching INIT_FALLBACKS entry, or the first one
             let init = INIT_FALLBACKS
                 .iter()
                 .find(|&&i| i == cmdline_init)
                 .copied()
                 .unwrap_or(INIT_FALLBACKS[0]);
-            return BootTarget {
-                mount_point: mount,
-                init_path: init,
-            };
+            return BootTarget { init_path: init };
         }
         klog!("  ⚠ cmdline init={cmdline_init} not found — falling back to auto-discovery");
     }
@@ -98,26 +88,13 @@ pub fn discover_boot_target(cmdline: &Cmdline, new_root: &str) -> BootTarget {
         "/overlayer/syshub/bin/bash"
     });
 
-    let mount_point = MOUNT_TARGETS
-        .iter()
-        .find(|&&t| Path::new(t).exists())
-        .copied()
-        .unwrap_or(MOUNT_TARGETS[0]);
-
-    BootTarget {
-        mount_point,
-        init_path,
-    }
+    BootTarget { init_path }
 }
 
 /// Moves /dev, /proc, /sys and /run in, pivots to /new_root, detaches the old root and execs init.
 pub fn pivot_to_root(target: &BootTarget) -> Result<(), String> {
-    // the overlay is always at /new_root; without it, boot the physical mount point
-    let new_root = if Path::new("/new_root").exists() {
-        "/new_root"
-    } else {
-        target.mount_point
-    };
+    // overlay.rs always builds the system at /new_root; nothing else is ever booted
+    let new_root = "/new_root";
     let init_rel = target.init_path;
 
     // pivot_root needs a mount point: bind /new_root onto itself
@@ -167,7 +144,9 @@ pub fn pivot_to_root(target: &BootTarget) -> Result<(), String> {
         Ok(()) => {
             chdir("/").map_err(|e| format!("chdir / post-pivot: {}", e))?;
             // Detach the physical disk — /zairoot is now invisible
-            let _ = umount2("/.old_root", MntFlags::MNT_DETACH);
+            // a disk still reachable here would let anyone write under the read-only view
+            umount2("/.old_root", MntFlags::MNT_DETACH)
+                .map_err(|e| format!("detach old root: {e}"))?;
             let _ = fs::remove_dir("/.old_root");
             klog!("  ✓ pivot_root complete — physical disk detached");
             true
@@ -210,12 +189,6 @@ pub fn pivot_to_root(target: &BootTarget) -> Result<(), String> {
 
 /// Boot target for rd.rescue and single: a bash shell.
 pub fn rescue_boot_target() -> BootTarget {
-    let mount_point = MOUNT_TARGETS
-        .iter()
-        .find(|&&t| Path::new(t).exists())
-        .copied()
-        .unwrap_or(MOUNT_TARGETS[0]);
-
     // Pick the best available rescue shell (Zainium's own, under syshub)
     let shells = [
         "/overlayer/syshub/bin/bash",
@@ -233,8 +206,5 @@ pub fn rescue_boot_target() -> BootTarget {
         .unwrap_or("/overlayer/syshub/bin/bash");
 
     klog!("  ✓ Rescue mode: {init_path}");
-    BootTarget {
-        mount_point,
-        init_path,
-    }
+    BootTarget { init_path }
 }

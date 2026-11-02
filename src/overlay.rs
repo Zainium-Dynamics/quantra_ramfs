@@ -76,7 +76,7 @@ pub fn mount_overlay(zairoot: &str, live: bool, rescue: bool) -> Result<String, 
         bind_persistent_dir(zairoot, "root")?;
     }
 
-    // zaisys and zexlib also show at their own paths under /overlayer, beside the merged syshub
+    // zaisys stays out of the syshub view: its own read-only mount, the only one left after the pivot
     bind_ro_dir(
         &format!("{}/overlayer/zaisys", zairoot),
         &format!("{}/overlayer/zaisys", root),
@@ -144,9 +144,8 @@ fn writable(dir: &str) -> Result<(), String> {
 
 /// Bind mount `src` → `dest` (writable), creating `dest` if needed.
 fn bind_dir(src: &str, dest: &str) -> Result<(), String> {
-    if !std::path::Path::new(src).exists() {
-        klog!("  '{}' not found — skipping bind mount", src);
-        return Ok(());
+    if !std::path::Path::new(src).is_dir() {
+        return Err(format!("{src} missing: not a Zainium disk"));
     }
     fs::create_dir_all(dest).map_err(|e| format!("create {}: {}", dest, e))?;
     mount(
@@ -176,7 +175,11 @@ fn bind_ro_file(src: &str, dest: &str) -> Result<(), String> {
         None::<&str>,
         dest,
         None::<&str>,
-        MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+        MsFlags::MS_BIND
+            | MsFlags::MS_REMOUNT
+            | MsFlags::MS_RDONLY
+            | MsFlags::MS_NOSUID
+            | MsFlags::MS_NODEV,
         None::<&str>,
     )
     .map_err(|e| format!("remount ro '{}': {}", dest, e))?;
@@ -186,9 +189,8 @@ fn bind_ro_file(src: &str, dest: &str) -> Result<(), String> {
 
 /// Bind mounts `src` on `dest` read-only (a bind mount needs a second, read-only remount).
 fn bind_ro_dir(src: &str, dest: &str) -> Result<(), String> {
-    if !std::path::Path::new(src).exists() {
-        klog!("  '{}' not found — skipping bind mount", src);
-        return Ok(());
+    if !std::path::Path::new(src).is_dir() {
+        return Err(format!("{src} missing: not a Zainium disk"));
     }
     fs::create_dir_all(dest).map_err(|e| format!("create {}: {}", dest, e))?;
     mount(
@@ -203,7 +205,11 @@ fn bind_ro_dir(src: &str, dest: &str) -> Result<(), String> {
         None::<&str>,
         dest,
         None::<&str>,
-        MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+        MsFlags::MS_BIND
+            | MsFlags::MS_REMOUNT
+            | MsFlags::MS_RDONLY
+            | MsFlags::MS_NOSUID
+            | MsFlags::MS_NODEV,
         None::<&str>,
     )
     .map_err(|e| format!("remount ro '{}': {}", dest, e))?;

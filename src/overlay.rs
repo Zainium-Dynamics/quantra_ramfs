@@ -37,12 +37,6 @@ pub fn mount_overlay(zairoot: &str, live: bool, rescue: bool) -> Result<String, 
         let dir = format!("{root}/{name}");
         fs::create_dir_all(&dir).map_err(|e| format!("create {dir}: {e}"))?;
     }
-    // services expect /var: it is the base's var, written to the union
-    let var_link = format!("{root}/var");
-    if !std::path::Path::new(&var_link).exists() {
-        std::os::unix::fs::symlink("/overlayer/syshub/var", &var_link)
-            .map_err(|e| format!("symlink {var_link}: {e}"))?;
-    }
 
     let opts = if rescue {
         format!("lowerdir={base}:{}", empty_layer()?)

@@ -45,7 +45,7 @@ pub fn mount_overlay(zairoot: &str, live: bool, rescue: bool) -> Result<String, 
     }
 
     let opts = if rescue {
-        format!("lowerdir={base}")
+        format!("lowerdir={base}:{}", empty_layer()?)
     } else {
         format!("lowerdir={base},upperdir={zexlib}/union,workdir={zexlib}/work,sealed")
     };
@@ -79,8 +79,8 @@ pub fn mount_overlay(zairoot: &str, live: bool, rescue: bool) -> Result<String, 
         bind_persistent_dir(zairoot, "root")?;
     }
 
-    // zaisys stays out of the syshub view: its own read-only mount, the only one left after the pivot
-    bind_ro_dir(
+    // zaisys stays out of the syshub view, in a mount of its own that root cannot make writable
+    locked_ro(
         &format!("{}/overlayer/zaisys", zairoot),
         &format!("{}/overlayer/zaisys", root),
     )?;
@@ -190,33 +190,30 @@ fn bind_ro_file(src: &str, dest: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Bind mounts `src` on `dest` read-only (a bind mount needs a second, read-only remount).
-fn bind_ro_dir(src: &str, dest: &str) -> Result<(), String> {
+/// An empty directory in the initramfs: the second lower layer an overlay without an upper needs.
+fn empty_layer() -> Result<&'static str, String> {
+    const EMPTY: &str = "/.overlay-empty";
+    fs::create_dir_all(EMPTY).map_err(|e| format!("create {EMPTY}: {e}"))?;
+    Ok(EMPTY)
+}
+
+/// `src` at `dest` as an overlay with no upper layer: the kernel then keeps it read-only for good
+/// and refuses `remount,rw` with EROFS, root included, which a read-only bind mount does not.
+fn locked_ro(src: &str, dest: &str) -> Result<(), String> {
     if !std::path::Path::new(src).is_dir() {
         return Err(format!("{src} missing: not a Zainium disk"));
     }
-    fs::create_dir_all(dest).map_err(|e| format!("create {}: {}", dest, e))?;
+    fs::create_dir_all(dest).map_err(|e| format!("create {dest}: {e}"))?;
+    let opts = format!("lowerdir={src}:{}", empty_layer()?);
     mount(
-        Some(src),
+        Some("overlay"),
         dest,
-        None::<&str>,
-        MsFlags::MS_BIND,
-        None::<&str>,
+        Some("overlay"),
+        MsFlags::MS_RDONLY | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        Some(opts.as_str()),
     )
-    .map_err(|e| format!("bind mount '{}' → '{}': {}", src, dest, e))?;
-    mount(
-        None::<&str>,
-        dest,
-        None::<&str>,
-        MsFlags::MS_BIND
-            | MsFlags::MS_REMOUNT
-            | MsFlags::MS_RDONLY
-            | MsFlags::MS_NOSUID
-            | MsFlags::MS_NODEV,
-        None::<&str>,
-    )
-    .map_err(|e| format!("remount ro '{}': {}", dest, e))?;
-    klog!("  ✓ {} bind mounted ← {} (read-only)", dest, src);
+    .map_err(|e| format!("overlay {dest}: {e}"))?;
+    klog!("  ✓ {dest} ← {src} (read-only, cannot be remounted writable)");
     Ok(())
 }
 

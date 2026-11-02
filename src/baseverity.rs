@@ -3,6 +3,7 @@
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::AsFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -15,6 +16,9 @@ const BASE: [&str; 2] = ["overlayer/syshub", "overlayer/zaisys"];
 /// zex-installed software: sealed on every boot, except its etc and var, which stay writable.
 const UNION: &str = "overlayer/zexlib/union";
 const UNION_WRITABLE: [&str; 2] = ["etc", "var"];
+
+/// What the last full check saw, kept on each tree's top directory (root-only, no extra file).
+const STAMP: &str = "trusted.zainium.verity";
 
 /// Shown on the splash while files are sealed.
 const SEALING: &str = "Securing the system…";
@@ -41,31 +45,62 @@ pub fn unsupported(e: &io::Error) -> bool {
 }
 
 /// Installed disk only: seals every base, zaisys and union file that is not sealed yet, on all CPUs.
+///
+/// A tree whose directories look exactly as at the last full check is skipped: adding, removing
+/// or renaming a file changes its directory's ctime, and a sealed file's content cannot change.
+/// zainium.verity=full on the kernel command line checks every file anyway.
 pub fn ensure_base(zairoot: &str) -> Result<(), String> {
     let z = Path::new(zairoot);
+    let full = fs::read_to_string("/proc/cmdline")
+        .is_ok_and(|c| c.split_whitespace().any(|a| a == "zainium.verity=full"));
+
     let mut base = Vec::new();
+    let mut base_fp = Fingerprint::default();
     for t in BASE {
-        walk(&z.join(t), &[], &mut base).map_err(|e| format!("scan {t}: {e}"))?;
+        walk(&z.join(t), &[], &mut base, &mut base_fp).map_err(|e| format!("scan {t}: {e}"))?;
     }
     let mut union = Vec::new();
-    let u = z.join(UNION);
-    if u.is_dir() {
-        walk(&u, &UNION_WRITABLE, &mut union).map_err(|e| format!("scan {UNION}: {e}"))?;
+    let mut union_fp = Fingerprint::default();
+    let union_top = z.join(UNION);
+    if union_top.is_dir() {
+        walk(&union_top, &UNION_WRITABLE, &mut union, &mut union_fp)
+            .map_err(|e| format!("scan {UNION}: {e}"))?;
     }
+    let (base_fp, union_fp) = (base_fp.to_string(), union_fp.to_string());
+    let base_top = z.join(BASE[0]);
 
-    let (sealed, failed) = seal(&base)?;
-    klog!(
-        "  ✓ fs-verity: base and zaisys {} files, {sealed} sealed now",
-        base.len()
-    );
-    if failed > 0 {
-        return Err(format!("{failed} base files could not be sealed"));
+    if full || get_stamp(&base_top).as_deref() != Some(base_fp.as_str()) {
+        let (sealed, failed) = seal(&base)?;
+        klog!(
+            "  ✓ fs-verity: base and zaisys {} files, {sealed} sealed now",
+            base.len()
+        );
+        if failed > 0 {
+            return Err(format!("{failed} base files could not be sealed"));
+        }
+        set_stamp(&base_top, &base_fp)?;
+    } else {
+        klog!(
+            "  ✓ fs-verity: base and zaisys unchanged since the last check ({} files)",
+            base.len()
+        );
     }
-    let (sealed, failed) = seal(&union)?;
-    klog!(
-        "  ✓ fs-verity: userland {} files, {sealed} sealed now, {failed} failed",
-        union.len()
-    );
+    if union_top.is_dir() && (full || get_stamp(&union_top).as_deref() != Some(union_fp.as_str())) {
+        let (sealed, failed) = seal(&union)?;
+        klog!(
+            "  ✓ fs-verity: userland {} files, {sealed} sealed now, {failed} failed",
+            union.len()
+        );
+        // a userland file that failed is tried again next boot
+        if failed == 0 {
+            set_stamp(&union_top, &union_fp)?;
+        }
+    } else {
+        klog!(
+            "  ✓ fs-verity: userland unchanged since the last check ({} files)",
+            union.len()
+        );
+    }
     Ok(())
 }
 
@@ -117,8 +152,64 @@ fn seal(files: &[PathBuf]) -> Result<(usize, usize), String> {
     Ok((sealed.into_inner(), failed.into_inner()))
 }
 
+fn get_stamp(dir: &Path) -> Option<String> {
+    let path = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
+    let name = std::ffi::CString::new(STAMP).ok()?;
+    let mut buf = [0u8; 128];
+    // SAFETY: both strings are NUL-terminated and buf is valid for its whole length
+    let n = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+fn set_stamp(dir: &Path, value: &str) -> Result<(), String> {
+    let path =
+        std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string())?;
+    let name = std::ffi::CString::new(STAMP).map_err(|e| e.to_string())?;
+    // SAFETY: both strings are NUL-terminated and value is valid for its whole length
+    let r = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+    if r != 0 {
+        return Err(format!(
+            "{STAMP} on {}: {}",
+            dir.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Directory count, file count and the newest change time of the directories below a tree's top
+/// (the top carries the stamp, so its own ctime is left out).
+#[derive(Default)]
+struct Fingerprint {
+    dirs: u64,
+    files: u64,
+    newest: i128,
+}
+
+impl std::fmt::Display for Fingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}:{}", self.dirs, self.files, self.newest)
+    }
+}
+
 /// Regular files under `dir` minus the top-level `skip` names, without following symlinks.
-fn walk(dir: &Path, skip: &[&str], out: &mut Vec<PathBuf>) -> io::Result<()> {
+fn walk(dir: &Path, skip: &[&str], out: &mut Vec<PathBuf>, fp: &mut Fingerprint) -> io::Result<()> {
+    fp.dirs += 1;
     for e in fs::read_dir(dir)? {
         let e = e?;
         let ft = e.file_type()?;
@@ -126,10 +217,45 @@ fn walk(dir: &Path, skip: &[&str], out: &mut Vec<PathBuf>) -> io::Result<()> {
             continue;
         }
         if ft.is_dir() {
-            walk(&e.path(), &[], out)?;
+            let m = e.metadata()?;
+            fp.newest = fp
+                .newest
+                .max(m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128);
+            walk(&e.path(), &[], out, fp)?;
         } else if ft.is_file() {
+            fp.files += 1;
             out.push(e.path());
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fp(dir: &Path) -> String {
+        let mut files = Vec::new();
+        let mut f = Fingerprint::default();
+        walk(dir, &[], &mut files, &mut f).unwrap();
+        f.to_string()
+    }
+
+    #[test]
+    fn fingerprint_changes_only_when_the_tree_does() {
+        let d = std::env::temp_dir().join(format!("verity-fp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("bin")).unwrap();
+        fs::write(d.join("bin/a"), "a").unwrap();
+        let before = fp(&d);
+        assert_eq!(before, fp(&d), "nothing changed");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(d.join("bin/new"), "n").unwrap();
+        let added = fp(&d);
+        assert_ne!(before, added, "a new file must force a full check");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::rename(d.join("bin/new"), d.join("bin/renamed")).unwrap();
+        assert_ne!(added, fp(&d), "a rename must force a full check");
+        let _ = fs::remove_dir_all(&d);
+    }
 }

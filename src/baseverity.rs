@@ -23,6 +23,19 @@ const STAMP: &str = "trusted.zainium.verity";
 /// Shown on the splash while files are sealed.
 const SEALING: &str = "Securing the system…";
 
+/// Sealing the userland is the user's choice: `elevate zex verity --union on` creates this
+/// file (and seals the union at once), `--union off` removes it.
+const UNION_SWITCH: &str = "overlayer/zexlib/seal-union";
+
+/// The userland is sealed only when asked: the switch file, or zainium.verity=union on the
+/// kernel command line. Sealed files can't be written, only replaced, which software that
+/// updates itself in place doesn't expect.
+fn union_wanted(zairoot: &Path) -> bool {
+    zairoot.join(UNION_SWITCH).exists()
+        || fs::read_to_string("/proc/cmdline")
+            .is_ok_and(|c| c.split_whitespace().any(|a| a == "zainium.verity=union"))
+}
+
 /// Turns on fs-verity for one file: Ok(true) if done now, Ok(false) if it already had it.
 pub fn enable(path: &Path) -> io::Result<bool> {
     let f = File::open(path)?;
@@ -44,7 +57,8 @@ pub fn unsupported(e: &io::Error) -> bool {
     )
 }
 
-/// Installed disk only: seals every base, zaisys and union file that is not sealed yet, on all CPUs.
+/// Installed disk only: seals every base and zaisys file that is not sealed yet, on all CPUs,
+/// and the userland's (union) files too when the user turned that on (`union_wanted`).
 ///
 /// A tree whose directories look exactly as at the last full check is skipped: adding, removing
 /// or renaming a file changes its directory's ctime, and a sealed file's content cannot change.
@@ -62,7 +76,8 @@ pub fn ensure_base(zairoot: &str) -> Result<(), String> {
     let mut union = Vec::new();
     let mut union_fp = Fingerprint::default();
     let union_top = z.join(UNION);
-    if union_top.is_dir() {
+    let seal_union = union_wanted(z);
+    if seal_union && union_top.is_dir() {
         walk(&union_top, &UNION_WRITABLE, &mut union, &mut union_fp)
             .map_err(|e| format!("scan {UNION}: {e}"))?;
     }
@@ -85,7 +100,11 @@ pub fn ensure_base(zairoot: &str) -> Result<(), String> {
             base.len()
         );
     }
-    if union_top.is_dir() && (full || get_stamp(&union_top).as_deref() != Some(union_fp.as_str())) {
+    if !seal_union {
+        klog!("  ✓ fs-verity: userland not sealed (turn on with: elevate zex verity --union on)");
+    } else if union_top.is_dir()
+        && (full || get_stamp(&union_top).as_deref() != Some(union_fp.as_str()))
+    {
         let (sealed, failed) = seal(&union)?;
         klog!(
             "  ✓ fs-verity: userland {} files, {sealed} sealed now, {failed} failed",

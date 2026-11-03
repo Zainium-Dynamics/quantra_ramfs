@@ -33,7 +33,8 @@ SYSHUB="${2:-/home/alizain/os/zairoot/overlayer/syshub}"
 OUT="${3:-/home/alizain/os/zairoot/overlayer/zaisys/kernel/quantra-ramfs.img}"
 
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+# Zainium's rm refuses any path with /overlayer/syshub in it, and the stage has one
+trap 'rm -rf "$STAGE" 2>/dev/null || python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1])" "$STAGE"' EXIT
 
 # The init binary itself, at the top level (unchanged from the original
 # working layout).

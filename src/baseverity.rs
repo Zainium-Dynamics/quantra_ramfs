@@ -24,7 +24,8 @@ const STAMP: &str = "trusted.zainium.verity";
 const SEALING: &str = "Securing the system…";
 
 /// Sealing the userland is the user's choice: `elevate zex verity --union on` creates this
-/// file (and seals the union at once), `--union off` removes it.
+/// file (and seals the union at once), `--union off` removes it; zainium.verity=union on the
+/// kernel command line turns it on for one boot.
 const UNION_SWITCH: &str = "overlayer/zexlib/seal-union";
 
 /// The userland is sealed only when asked: the switch file, or zainium.verity=union on the
@@ -62,7 +63,8 @@ pub fn unsupported(e: &io::Error) -> bool {
 ///
 /// A tree whose directories look exactly as at the last full check is skipped: adding, removing
 /// or renaming a file changes its directory's ctime, and a sealed file's content cannot change.
-/// zainium.verity=full on the kernel command line checks every file anyway.
+/// zainium.verity=full on the kernel command line checks every file anyway. No option turns
+/// sealing the base and zaisys off.
 pub fn ensure_base(zairoot: &str) -> Result<(), String> {
     let z = Path::new(zairoot);
     let full = fs::read_to_string("/proc/cmdline")

@@ -21,6 +21,21 @@ without the software you installed. rd.break=<phase> stops at that phase
 with an emergency shell whose commands need no external programs.
 
 
+fs-verity
+---------
+
+At every boot the base (overlayer/syshub) and zaisys are sealed with
+fs-verity; no option turns that off. A tree that did not change since the
+last boot is not checked again.
+
+  zainium.verity=full    check and seal every file, changed or not
+  zainium.verity=union   seal the userland (overlayer/zexlib/union, not etc
+                         and var) for this boot
+
+The userland is sealed at every boot when overlayer/zexlib/seal-union
+exists: "elevate zex verity --union on" creates it, "--union off" removes it.
+
+
 Building
 --------
 

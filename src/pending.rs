@@ -507,7 +507,7 @@ fn set_tree_immutable(dir: &Path) {
 }
 
 /// chattr ±i; symlinks and filesystems without inode flags are skipped silently.
-fn set_immutable(path: &Path, on: bool) {
+pub fn set_immutable(path: &Path, on: bool) {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return;
     };

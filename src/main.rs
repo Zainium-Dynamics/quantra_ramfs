@@ -19,6 +19,7 @@ mod phases;
 mod plymouth;
 mod raid;
 mod rootfs;
+mod shadow;
 mod switch;
 mod tpm2;
 mod udev;

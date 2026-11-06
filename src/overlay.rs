@@ -24,6 +24,7 @@ pub fn mount_overlay(zairoot: &str, live: bool, rescue: bool) -> Result<String, 
         // staged `zex syshub -u` upgrades go into the base here, while nothing has it mounted
         crate::pending::run(zairoot).map_err(|e| format!("base upgrade: {e}"))?;
         crate::baseverity::ensure_base(zairoot).map_err(|e| format!("fs-verity: {e}"))?;
+        crate::shadow::clear(std::path::Path::new(zairoot));
         zexlib
     };
     for d in ["union/etc", "union/var", "work", "work-etc", "work-var"] {

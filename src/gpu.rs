@@ -24,10 +24,11 @@ pub fn load_from_disk(zairoot: &str) -> usize {
         klog!("  gpu: no drivers dir on the root disk");
         return 0;
     }
-    // a kernel just installed by zex kernel boots once before its modules leave the staged upgrade
+    // a kernel just installed by zex kernel boots once before its modules leave the staged
+    // upgrade; the module dir keeps its name across builds, and only its own build's will load
     let mut moddir = format!("{DRIVERS}/modules/{release}");
     let staged = format!("{zairoot}/overlayer/.syshub-pending/root/drivers/modules/{release}");
-    if !Path::new(&moddir).is_dir() && Path::new(&staged).is_dir() {
+    if Path::new(&staged).is_dir() {
         klog!("  gpu: modules for {release} come from the staged upgrade");
         moddir = staged;
     }

@@ -21,6 +21,8 @@ const UNION_WRITABLE: [&str; 2] = ["etc", "var"];
 /// What the last full check saw, kept on each tree's top directory (root-only, no extra file).
 const STAMP: &str = "trusted.zainium.verity";
 
+/// Shown on the splash while files are sealed.
+const SEALING: &str = "Securing the system…";
 
 /// Sealing the userland is the user's choice: `elevate zex verity --union on` creates this
 /// file (and seals the union at once), `--union off` removes it; zainium.verity=union on the
@@ -129,6 +131,7 @@ fn seal(files: &[PathBuf]) -> Result<(usize, usize), String> {
     let sealed = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
     let unsupported_fs = AtomicUsize::new(0);
+    let shown = AtomicUsize::new(0);
     let next = AtomicUsize::new(0);
     let workers = thread::available_parallelism()
         .map_or(4, |n| n.get())
@@ -141,7 +144,11 @@ fn seal(files: &[PathBuf]) -> Result<(usize, usize), String> {
                     let Some(f) = files.get(i) else { break };
                     match enable(f) {
                         Ok(true) => {
-                            sealed.fetch_add(1, Ordering::Relaxed);
+                            // the splash only appears when there is real work
+                            if sealed.fetch_add(1, Ordering::Relaxed) == 0 {
+                                crate::plymouth::show_message(SEALING);
+                                shown.store(1, Ordering::Relaxed);
+                            }
                         }
                         Ok(false) => {}
                         Err(e) if unsupported(&e) => {
@@ -158,6 +165,9 @@ fn seal(files: &[PathBuf]) -> Result<(usize, usize), String> {
             });
         }
     });
+    if shown.into_inner() == 1 {
+        crate::plymouth::hide_message(SEALING);
+    }
     if unsupported_fs.into_inner() > 0 {
         return Err("the root filesystem has no fs-verity (tune2fs -O verity)".into());
     }

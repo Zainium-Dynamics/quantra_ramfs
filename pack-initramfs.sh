@@ -29,8 +29,8 @@
 set -e
 
 RAMFS_BIN="${1:-target/x86_64-unknown-linux-musl/release/quantra-ramfs}"
-SYSHUB="${2:-/home/alizain/os/zairoot/overlayer/syshub}"
-OUT="${3:-/home/alizain/os/zairoot/overlayer/zaisys/kernel/quantra-ramfs.img}"
+SYSHUB="${2:-/home/alizain/backup/os/zairoot/overlayer/syshub}"
+OUT="${3:-/home/alizain/backup/os/zairoot/overlayer/zaisys/kernel/quantra-ramfs.img}"
 
 STAGE="$(mktemp -d)"
 # Zainium's rm refuses any path with /overlayer/syshub in it, and the stage has one

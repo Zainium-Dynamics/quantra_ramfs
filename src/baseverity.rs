@@ -6,6 +6,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::thread;
 
 use fs_verity::InnerHashAlgorithm;
@@ -228,26 +229,96 @@ impl std::fmt::Display for Fingerprint {
     }
 }
 
-/// Regular files under `dir` minus the top-level `skip` names, without following symlinks.
-fn walk(dir: &Path, skip: &[&str], out: &mut Vec<PathBuf>, fp: &mut Fingerprint) -> io::Result<()> {
-    fp.dirs += 1;
+/// What the scan threads share.
+#[derive(Default)]
+struct Scan {
+    todo: Vec<PathBuf>,
+    busy: usize,
+    out: Vec<PathBuf>,
+    fp: Fingerprint,
+    err: Option<io::Error>,
+}
+
+/// One directory: its subdirectories, its regular files and the newest ctime below it.
+fn scan_dir(dir: &Path, skip: &[&str]) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>, i128)> {
+    let (mut dirs, mut files, mut newest) = (Vec::new(), Vec::new(), 0);
     for e in fs::read_dir(dir)? {
         let e = e?;
-        let ft = e.file_type()?;
         if skip.iter().any(|s| e.file_name() == *s) {
             continue;
         }
+        let ft = e.file_type()?;
         if ft.is_dir() {
             let m = e.metadata()?;
-            fp.newest = fp
-                .newest
-                .max(m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128);
-            walk(&e.path(), &[], out, fp)?;
+            newest = newest.max(m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128);
+            dirs.push(e.path());
         } else if ft.is_file() {
-            fp.files += 1;
-            out.push(e.path());
+            files.push(e.path());
         }
     }
+    Ok((dirs, files, newest))
+}
+
+fn scan_worker(state: &Mutex<Scan>, wake: &Condvar) {
+    let mut s = state.lock().unwrap();
+    loop {
+        let Some(dir) = s.todo.pop() else {
+            if s.busy == 0 {
+                wake.notify_all();
+                return;
+            }
+            s = wake.wait(s).unwrap();
+            continue;
+        };
+        s.busy += 1;
+        drop(s);
+        let found = scan_dir(&dir, &[]);
+        s = state.lock().unwrap();
+        s.busy -= 1;
+        match found {
+            Ok((dirs, files, newest)) => {
+                s.fp.dirs += 1;
+                s.fp.files += files.len() as u64;
+                s.fp.newest = s.fp.newest.max(newest);
+                s.out.extend(files);
+                s.todo.extend(dirs);
+            }
+            Err(e) => {
+                s.todo.clear();
+                s.err = Some(e);
+            }
+        }
+        wake.notify_all();
+    }
+}
+
+/// Regular files under `dir` minus the top-level `skip` names, without following symlinks,
+/// read on several threads: most of a normal boot's wait here is the disk.
+fn walk(dir: &Path, skip: &[&str], out: &mut Vec<PathBuf>, fp: &mut Fingerprint) -> io::Result<()> {
+    let (dirs, files, newest) = scan_dir(dir, skip)?;
+    fp.dirs += 1;
+    fp.files += files.len() as u64;
+    fp.newest = fp.newest.max(newest);
+    out.extend(files);
+    let state = Mutex::new(Scan {
+        todo: dirs,
+        ..Scan::default()
+    });
+    let wake = Condvar::new();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().clamp(4, 16));
+    std::thread::scope(|t| {
+        for _ in 0..threads {
+            t.spawn(|| scan_worker(&state, &wake));
+        }
+    });
+    let done = state.into_inner().unwrap();
+    if let Some(e) = done.err {
+        return Err(e);
+    }
+    fp.dirs += done.fp.dirs;
+    fp.files += done.fp.files;
+    fp.newest = fp.newest.max(done.fp.newest);
+    out.extend(done.out);
     Ok(())
 }
 

@@ -109,13 +109,20 @@ fn apply(z: &Path, pending: &Path, rollback: &Path) -> Result<String, String> {
         .open(tdir.join("journal"))
         .map_err(|e| format!("journal: {e}"))?;
 
+    // one write and one sync for the whole upgrade: a sync per file takes a minute on a laptop.
+    // undo() skips an entry that was never reached, so the plan can be logged up front.
+    let plan = plan(&entries, &base, &union);
+    journal
+        .write_all(plan.as_bytes())
+        .and_then(|_| journal.sync_all())
+        .map_err(|e| format!("journal: {e}"))?;
+
     for e in entries.iter().filter(|e| matches!(e, Entry::Dir { .. })) {
         let Entry::Dir { mode, rel } = e else {
             continue;
         };
         let dst = base.join(rel);
         if !dst.is_dir() {
-            log(&mut journal, 'D', rel)?;
             fs::create_dir_all(&dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
             let _ = fs::set_permissions(&dst, fs::Permissions::from_mode(*mode));
         }
@@ -129,13 +136,10 @@ fn apply(z: &Path, pending: &Path, rollback: &Path) -> Result<String, String> {
             fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
         if fs::symlink_metadata(&dst).is_ok() {
-            log(&mut journal, 'B', rel)?;
             let bak = tdir.join("files").join(rel);
             fs::create_dir_all(bak.parent().unwrap()).map_err(|e| e.to_string())?;
             set_immutable(&dst, false);
             fs::rename(&dst, &bak).map_err(|e| format!("backup {}: {e}", dst.display()))?;
-        } else {
-            log(&mut journal, 'N', rel)?;
         }
         place(&staged, e, &dst)?;
 
@@ -146,7 +150,6 @@ fn apply(z: &Path, pending: &Path, rollback: &Path) -> Result<String, String> {
                 .map(|m| !m.is_dir())
                 .unwrap_or(false)
             {
-                log(&mut journal, 'U', rel)?;
                 let keep = tdir.join("union").join(rel);
                 fs::create_dir_all(keep.parent().unwrap()).map_err(|e| e.to_string())?;
                 set_immutable(&u, false);
@@ -178,9 +181,6 @@ fn place(staged: &Path, e: &Entry, dst: &Path) -> Result<(), String> {
             let src = staged.join(rel);
             fs::copy(&src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(*mode))
-                .map_err(|e| e.to_string())?;
-            File::open(&tmp)
-                .and_then(|f| f.sync_all())
                 .map_err(|e| e.to_string())?;
             // sealed before it takes the real name: once in the base, its content cannot be rewritten
             match crate::baseverity::enable(&tmp) {
@@ -444,10 +444,33 @@ fn safe_rel(rel: &Path) -> bool {
     !rel.as_os_str().is_empty() && rel.components().all(|c| matches!(c, Component::Normal(_)))
 }
 
-fn log(journal: &mut File, kind: char, rel: &Path) -> Result<(), String> {
-    writeln!(journal, "{kind}\t{}", rel.display())
-        .and_then(|_| journal.sync_all())
-        .map_err(|e| format!("journal: {e}"))
+/// The journal of an upgrade, written before anything is touched.
+fn plan(entries: &[Entry], base: &Path, union: &Path) -> String {
+    let mut lines = String::new();
+    let mut add = |kind: char, rel: &Path| lines.push_str(&format!("{kind}\t{}\n", rel.display()));
+    for e in entries {
+        let rel = e.rel();
+        let dst = base.join(rel);
+        if matches!(e, Entry::Dir { .. }) {
+            if !dst.is_dir() {
+                add('D', rel);
+            }
+            continue;
+        }
+        add(
+            if fs::symlink_metadata(&dst).is_ok() {
+                'B'
+            } else {
+                'N'
+            },
+            rel,
+        );
+        let in_union = fs::symlink_metadata(union.join(rel));
+        if !rel.starts_with("etc") && in_union.map(|m| !m.is_dir()).unwrap_or(false) {
+            add('U', rel);
+        }
+    }
+    lines
 }
 
 /// root-owned 0700, so nothing but root can see or touch it.

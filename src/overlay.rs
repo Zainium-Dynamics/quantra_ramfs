@@ -80,6 +80,10 @@ pub fn mount_overlay(zairoot: &str, live: bool, rescue: bool) -> Result<String, 
         &format!("{}/overlayer/zaisys", root),
     )?;
     bind_dir(&zexlib_src, &format!("{}/overlayer/zexlib", root))?;
+    // a live session without the preinstalled apps still boots
+    if live && let Err(e) = live_flatpak(zairoot, &zexlib_src, &root) {
+        klog!("  warning: {e}");
+    }
     // root-only staging area for `zex syshub -u` (installed disk only, created by pending::run)
     if !live && !rescue {
         bind_dir(
@@ -275,6 +279,34 @@ fn overlay_live_dir(zairoot: &str, name: &str) -> Result<(), String> {
     .map_err(|e| format!("overlay /{}: {}", name, e))?;
 
     klog!("  ✓ /{} overlay (live, writable, not persistent)", name);
+    Ok(())
+}
+
+/// The image's preinstalled flatpaks (Firefox and its runtime) in the live session.
+/// The live zexlib is an empty tmpfs, so the image's own flatpak installation goes on top of it
+/// as an overlay: apps installed in the live session land in RAM, the image stays untouched.
+fn live_flatpak(zairoot: &str, zexlib: &str, root: &str) -> Result<(), String> {
+    const FLATPAK: &str = "union/var/lib/flatpak";
+    let src = format!("{zairoot}/overlayer/zexlib/{FLATPAK}");
+    if !std::path::Path::new(&src).is_dir() {
+        return Ok(());
+    }
+    let upper = format!("{zexlib}/flatpak-upper");
+    let work = format!("{zexlib}/flatpak-work");
+    let dest = format!("{root}/overlayer/zexlib/{FLATPAK}");
+    for dir in [&upper, &work, &dest] {
+        fs::create_dir_all(dir).map_err(|e| format!("create {dir}: {e}"))?;
+    }
+    let opts = format!("lowerdir={src},upperdir={upper},workdir={work}");
+    mount(
+        Some("overlay"),
+        dest.as_str(),
+        Some("overlay"),
+        MsFlags::empty(),
+        Some(opts.as_str()),
+    )
+    .map_err(|e| format!("overlay {dest}: {e}"))?;
+    klog!("  ✓ preinstalled flatpaks from the image (live, changes kept in RAM)");
     Ok(())
 }
 

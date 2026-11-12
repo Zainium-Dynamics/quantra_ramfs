@@ -99,6 +99,27 @@ for rel in $NEEDED; do
     copy_one "$rel"
 done
 
+# cryptsetup opens an encrypted root (luks=). Its libraries are found from the binary's
+# DT_NEEDED, so a new openssl or lvm2 soname needs no change here. A base without the
+# cryptsetup command still packs: only encrypted roots need it.
+SEEN=" "
+copy_elf() {
+    case "$SEEN" in *" $1 "*) return 0 ;; esac
+    SEEN="$SEEN$1 "
+    [ -e "$SYSHUB/$1" ] || { echo "WARNING: missing on syshub, skipped: $1" >&2; return 0; }
+    copy_one "$1"
+    for lib in $(readelf -d "$SYSHUB/$1" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+        case "$lib" in libc.so) continue ;; esac
+        for dir in lib x86_64-zainium-linux-musl/lib; do
+            if [ -e "$SYSHUB/$dir/$lib" ]; then
+                copy_elf "$dir/$lib"
+                break
+            fi
+        done
+    done
+}
+copy_elf bin/cryptsetup
+
 # The theme itself, wholesale.
 mkdir -p "$STAGE/overlayer/syshub/share/plymouth/themes"
 cp -a "$SYSHUB/share/plymouth/themes/zainium" \

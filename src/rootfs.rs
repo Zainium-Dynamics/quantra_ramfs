@@ -578,9 +578,28 @@ fn open_luks_device(device: &str, name: &str, keyfile: Option<&str>) -> Result<S
         }
     }
 
-    // Strategy 2: Interactive passphrase prompt on /dev/console
-    let passphrase = prompt_luks_passphrase(name)?;
-    open_luks_with_passphrase(device, name, &passphrase)
+    // Strategy 2: ask for the passphrase, in the splash's password box when it is up
+    // (a console prompt would sit hidden behind it), up to three times
+    let mut last = String::new();
+    for attempt in 1..=3 {
+        let prompt = if attempt == 1 {
+            "Enter the passphrase to unlock the disk".to_string()
+        } else {
+            format!("Wrong passphrase, try again ({attempt} of 3)")
+        };
+        let passphrase = match crate::plymouth::ask_password(&prompt) {
+            Some(p) => p,
+            None => prompt_luks_passphrase(name)?,
+        };
+        match open_luks_with_passphrase(device, name, &passphrase) {
+            Ok(dev) => return Ok(dev),
+            Err(e) => {
+                klog!("  ⚠ unlock attempt {}: {}", attempt, e);
+                last = e;
+            }
+        }
+    }
+    Err(format!("the disk could not be unlocked: {last}"))
 }
 
 /// Reads a keyfile given as <device>:<path> (mounting the device) or as a plain path.

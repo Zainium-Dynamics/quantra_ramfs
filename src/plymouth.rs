@@ -486,6 +486,28 @@ fn plymouth_ok(args: &[&str]) -> bool {
     })
 }
 
+/// Asks for a password in the splash's own password box; None when there is no splash
+/// or the box was dismissed. plymouth prints the typed text on stdout.
+pub fn ask_password(prompt: &str) -> Option<Vec<u8>> {
+    if !PLYMOUTH_ACTIVE.load(Ordering::Relaxed) {
+        return None;
+    }
+    let bin = find_bin(PLYMOUTH_BINS)?;
+    let out = std::process::Command::new(&bin)
+        .args(["ask-for-password", &format!("--prompt={prompt}")])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut pw = out.stdout;
+    while pw.last() == Some(&b'\n') {
+        pw.pop();
+    }
+    (!pw.is_empty()).then_some(pw)
+}
+
 fn run_plymouth(args: &[&str]) {
     if let Some(bin) = find_bin(PLYMOUTH_BINS) {
         std::process::Command::new(&bin).args(args).status().ok();

@@ -904,8 +904,9 @@ fn mount_root_impl(device: &str, cmdline: &Cmdline, mount_target: &str) -> Resul
                 klog!("Strategy: Partition → fallback candidates (no rootfstype= provided)");
             }
 
+            // an encrypted root mounts from its opened mapping, not the LUKS partition
             if !try_mount_root_candidates(
-                device,
+                &actual_device,
                 explicit_root_fstype,
                 mount_target,
                 &[
@@ -914,7 +915,7 @@ fn mount_root_impl(device: &str, cmdline: &Cmdline, mount_target: &str) -> Resul
             ) {
                 return Err(format!(
                     "partition mount failed after filesystem attempts: {}",
-                    device
+                    actual_device
                 ));
             }
 

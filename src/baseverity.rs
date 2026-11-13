@@ -133,16 +133,43 @@ fn seal(files: &[PathBuf]) -> Result<(usize, usize), String> {
     let unsupported_fs = AtomicUsize::new(0);
     let shown = AtomicUsize::new(0);
     let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let finished = std::sync::atomic::AtomicBool::new(false);
     let workers = thread::available_parallelism()
         .map_or(4, |n| n.get())
         .min(16);
+    let workers_left = AtomicUsize::new(workers);
     thread::scope(|s| {
+        // once sealing has started, the splash shows how far it is every second
+        s.spawn(|| {
+            let mut last = String::new();
+            while !finished.load(Ordering::Relaxed) {
+                thread::sleep(std::time::Duration::from_secs(1));
+                if shown.load(Ordering::Relaxed) == 1 {
+                    let now = format!(
+                        "{SEALING} {} of {}",
+                        done.load(Ordering::Relaxed),
+                        files.len()
+                    );
+                    if !last.is_empty() {
+                        crate::plymouth::hide_message(&last);
+                    }
+                    crate::plymouth::show_message(&now);
+                    last = now;
+                }
+            }
+            if !last.is_empty() {
+                crate::plymouth::hide_message(&last);
+            }
+        });
         for _ in 0..workers {
             s.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(f) = files.get(i) else { break };
-                    match enable(f) {
+                    let result = enable(f);
+                    done.fetch_add(1, Ordering::Relaxed);
+                    match result {
                         Ok(true) => {
                             // the splash only appears when there is real work
                             if sealed.fetch_add(1, Ordering::Relaxed) == 0 {
@@ -161,6 +188,9 @@ fn seal(files: &[PathBuf]) -> Result<(usize, usize), String> {
                             }
                         }
                     }
+                }
+                if workers_left.fetch_sub(1, Ordering::Relaxed) == 1 {
+                    finished.store(true, Ordering::Relaxed);
                 }
             });
         }

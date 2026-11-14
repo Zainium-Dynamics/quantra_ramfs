@@ -182,9 +182,10 @@ pub fn pivot_to_root(target: &BootTarget) -> Result<(), String> {
     // Step 4: execv — never returns on success
     let cs = CString::new(init_rel).map_err(|e| format!("CString '{}': {}", init_rel, e))?;
     let args = vec![cs.clone()];
-    execv(&cs, &args).map_err(|e| format!("execv '{}': {}", init_rel, e))?;
-
-    unreachable!("execv returned — kernel bug");
+    match execv(&cs, &args) {
+        Ok(never) => match never {},
+        Err(e) => Err(format!("execv '{}': {}", init_rel, e)),
+    }
 }
 
 /// Boot target for rd.rescue and single: a bash shell.

@@ -1,6 +1,6 @@
 [package]
 name = "quantra-ramfs"
-version = "6.1.5"
+version = "6.1.7"
 edition = "2024"
 rust-version = "1.87"
 license = "MIT"

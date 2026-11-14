@@ -318,15 +318,27 @@ pub fn find_root(cmdline: &Cmdline) -> Result<String, String> {
         root_spec.clone()
     };
 
-    // rootwait=N retries every 50 ms; bare rootwait waits forever; default 100 tries
+    // A disk named by UUID= or LABEL= can be a USB drive, which a real computer may only
+    // report seconds after the initramfs starts: its /dev/disk/by-* link is made again while
+    // waiting, and the wait is longer. Such a root is never replaced by a guess.
+    let by_id = root_spec.starts_with("UUID=") || root_spec.starts_with("LABEL=");
+
+    // rootwait=N retries every 50 ms; bare rootwait waits forever; default 5 s, 30 s by id
     const RETRY_MS: u64 = 50;
     let max_retries: u32 = match cmdline.rootwait {
-        Some(0) => u32::MAX, // rootwait (bare) — wait indefinitely
-        Some(n) => n,        // rootwait=N — wait N × 50ms
-        None => 100,         // default — 100 × 50ms = 5s
+        Some(0) => u32::MAX,  // rootwait (bare) — wait indefinitely
+        Some(n) => n,         // rootwait=N — wait N × 50ms
+        None if by_id => 600, // 600 × 50ms = 30s
+        None => 100,          // default — 100 × 50ms = 5s
     };
 
     for attempt in 0..max_retries {
+        if by_id && attempt > 0 && attempt % 10 == 0 {
+            crate::udev::create_disk_symlinks();
+            if attempt % 100 == 0 {
+                klog!("  still waiting for {} ({} s)", root_spec, attempt / 20);
+            }
+        }
         if probe_device_fast(&device_path) {
             if attempt > 0 {
                 klog!(
@@ -342,6 +354,15 @@ pub fn find_root(cmdline: &Cmdline) -> Result<String, String> {
         if attempt < max_retries - 1 {
             std::thread::sleep(std::time::Duration::from_millis(RETRY_MS));
         }
+    }
+
+    if by_id {
+        list_available_devices();
+        return Err(format!(
+            "No disk with {} appeared within {} s (add rootwait to wait longer)",
+            root_spec,
+            max_retries / 20
+        ));
     }
 
     // Universal fallback strategy
@@ -904,8 +925,9 @@ fn mount_root_impl(device: &str, cmdline: &Cmdline, mount_target: &str) -> Resul
                 klog!("Strategy: Partition → fallback candidates (no rootfstype= provided)");
             }
 
+            // an encrypted root mounts from its opened mapping, not the LUKS partition
             if !try_mount_root_candidates(
-                device,
+                &actual_device,
                 explicit_root_fstype,
                 mount_target,
                 &[
@@ -914,7 +936,7 @@ fn mount_root_impl(device: &str, cmdline: &Cmdline, mount_target: &str) -> Resul
             ) {
                 return Err(format!(
                     "partition mount failed after filesystem attempts: {}",
-                    device
+                    actual_device
                 ));
             }
 

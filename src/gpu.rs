@@ -1,7 +1,7 @@
 //! Display driver and firmware from the root disk, loaded before the splash starts.
 
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
@@ -34,6 +34,7 @@ pub fn load_from_disk(zairoot: &str) -> usize {
     }
     let aliases = read_aliases(&format!("{moddir}/modules.alias"));
     let deps = read_deps(&format!("{moddir}/modules.dep"));
+    let blacklist = read_blacklist(zairoot);
 
     let mut devices = 0;
     for modalias in display_modaliases() {
@@ -42,6 +43,7 @@ pub fn load_from_disk(zairoot: &str) -> usize {
             .iter()
             .filter(|(p, _)| glob(p, &modalias))
             .map(|(_, m)| m)
+            .filter(|m| !blacklist.contains(&m.replace('-', "_")))
         {
             match load_with_deps(&moddir, module, &deps) {
                 Ok(()) => loaded = true,
@@ -110,6 +112,57 @@ fn display_modaliases() -> Vec<String> {
 }
 
 /// `alias <pattern> <module>` lines of modules.alias, in file order.
+/// The modules modprobe would not load by alias: `blacklist` lines of modprobe.d, read like
+/// kmod does (a file in etc replaces the base's lib file of the same name; the admin's etc
+/// over the base's), plus modprobe.blacklist= on the kernel command line. Without it the
+/// splash would load every driver that matches, nouveau and NVIDIA's together.
+fn read_blacklist(zairoot: &str) -> HashSet<String> {
+    let mut files: HashMap<String, std::path::PathBuf> = HashMap::new();
+    for dir in [
+        "/overlayer/syshub/lib/modprobe.d",
+        "/overlayer/syshub/etc/modprobe.d",
+        "/overlayer/zexlib/union/etc/modprobe.d",
+    ] {
+        for e in fs::read_dir(format!("{zairoot}{dir}"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".conf") {
+                files.insert(name, e.path());
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    for path in files.values() {
+        for line in fs::read_to_string(path).unwrap_or_default().lines() {
+            let mut words = line.split_whitespace();
+            if words.next() == Some("blacklist") {
+                if let Some(m) = words.next() {
+                    out.insert(m.replace('-', "_"));
+                }
+            }
+        }
+    }
+    for tok in fs::read_to_string("/proc/cmdline")
+        .unwrap_or_default()
+        .split_whitespace()
+    {
+        if let Some(list) = tok.strip_prefix("modprobe.blacklist=") {
+            out.extend(list.split(',').map(|m| m.replace('-', "_")));
+        }
+    }
+    if !out.is_empty() {
+        klog!("  gpu: not loading {}", {
+            let mut v: Vec<_> = out.iter().cloned().collect();
+            v.sort();
+            v.join(" ")
+        });
+    }
+    out
+}
+
 fn read_aliases(path: &str) -> Vec<(String, String)> {
     let Ok(text) = fs::read_to_string(path) else {
         return Vec::new();
